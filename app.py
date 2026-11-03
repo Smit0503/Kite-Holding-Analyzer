@@ -286,7 +286,7 @@ def holdings_page():
     all_items = items + [
         {
             **item,
-            "tradingsymbol": item.get("tradingsymbol") or item.get("scheme") or item.get("name") or "MF",
+            "tradingsymbol": item.get("fund") or item.get("scheme") or item.get("name") or "MF",
             "product": item.get("product") or "MF",
             "exchange": item.get("exchange") or "MF",
             "is_mf": True,
@@ -438,13 +438,106 @@ def api_tradebook():
         return jsonify({"error": f"Tradebook fetch failed: {exc}"}), 500
 
 
-@app.route('/api/portfolio/metrics/<period>', methods=['GET'])
-def api_metrics(period):
-    holdings = SESSION.get("holdings") or {}
-    access_token = SESSION.get("access_token") or ""
-    api_key = getattr(kite_client, "api_key", "")
-    result = calculate_metrics(holdings, period, access_token=access_token, api_key=api_key)
-    return jsonify(result), 200
+@app.route('/api/refresh')
+def api_refresh():
+    if not SESSION.get("access_token") or not kite_client:
+        return jsonify({"error": "Authentication or client not configured."}), 401
+
+    try:
+        raw_holdings = kite_client.get_holdings(SESSION["access_token"])
+        mf_holdings = []
+        try:
+            mf_holdings = kite_client.get_mf_holdings(SESSION["access_token"])
+        except Exception:
+            mf_holdings = []
+
+        all_items = []
+        if isinstance(raw_holdings, dict):
+            raw_holdings = raw_holdings.get("data") or []
+        if isinstance(raw_holdings, list):
+            all_items.extend(raw_holdings)
+        if isinstance(mf_holdings, list):
+            all_items.extend([
+                {
+                    **item,
+                    "tradingsymbol": item.get("fund") or item.get("scheme") or item.get("name") or "MF",
+                    "asset_type": "mf",
+                }
+                for item in mf_holdings
+                if isinstance(item, dict)
+            ])
+
+        rows = []
+        for item in all_items:
+            if not isinstance(item, dict):
+                continue
+            normalized = normalize_holding_row(item)
+            asset_type = classify_asset(item)
+            if asset_type not in {"equity", "debt", "mf", "metal"}:
+                asset_type = "equity"
+            rows.append({
+                "tradingsymbol": item.get("tradingsymbol") or item.get("fund") or item.get("scheme") or item.get("name") or "N/A",
+                "asset_type": asset_type,
+                "quantity": normalized["quantity"],
+                "average_price": normalized["average_price"],
+                "ltp": normalized["ltp"],
+                "day_change": normalized["day_change"],
+                "pnl": normalized["pnl"],
+                "purchase_date": item.get("purchase_date") or "N/A",
+            })
+
+        aggregate = {
+            'equity': {'invested': 0.0, 'current': 0.0, 'pnl': 0.0},
+            'debt': {'invested': 0.0, 'current': 0.0, 'pnl': 0.0},
+            'mf': {'invested': 0.0, 'current': 0.0, 'pnl': 0.0},
+            'metal': {'invested': 0.0, 'current': 0.0, 'pnl': 0.0},
+        }
+
+        total_invested = 0.0
+        total_current = 0.0
+        total_pnl = 0.0
+
+        for row in rows:
+            qty = float(row['quantity'] or 0)
+            avg = float(row['average_price'] or 0)
+            ltp = float(row['ltp'] or row['average_price'] or 0)
+            pnl = float(row['pnl'] or 0)
+            asset_type = str(row.get('asset_type') or 'equity').strip().lower()
+            if asset_type == 'n/a' or asset_type == 'na':
+                asset_type = 'equity'
+            if asset_type not in aggregate:
+                asset_type = 'equity'
+            aggregate[asset_type]['invested'] += qty * avg
+            aggregate[asset_type]['current'] += qty * ltp
+            aggregate[asset_type]['pnl'] += pnl
+
+            total_invested += qty * avg
+            total_current += qty * ltp
+            total_pnl += pnl
+
+        SESSION["holdings"] = raw_holdings
+        SESSION["mf_holdings"] = mf_holdings
+        save_session_to_db(
+            access_token=SESSION.get("access_token"),
+            user=SESSION.get("user"),
+            holdings=raw_holdings,
+            mf_holdings=mf_holdings,
+        )
+
+        return jsonify({
+            "rows": rows,
+            "invested_value": total_invested,
+            "portfolio_value": total_current,
+            "total_pnl": total_pnl,
+            "total_profit_pct": ((total_pnl / total_invested) * 100) if total_invested else 0.0,
+            "aggregate_by_asset": aggregate,
+            "user_name": (SESSION.get("user") or {}).get("user_name") or (SESSION.get("user") or {}).get("name") or "User",
+            "asset_filter": "all",
+        })
+    
+    except Exception as e:
+        print(f"Error refreshing data: {e}")
+        return jsonify({"error": f"Failed to fetch data: {str(e)}"}), 500
 
 
 @app.route('/logout')

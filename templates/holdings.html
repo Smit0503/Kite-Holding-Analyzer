@@ -30,8 +30,11 @@
 
       <main class="panel">
         <div class="toolbar">
-          <h1>Portfolio Summary</h1>
-          <a class="button primary" href="/tradebook">Tradebook / P&amp;L</a>
+          <h1 id="summary-title">Portfolio Summary</h1>
+          <div class="toolbar-actions">
+            <a class="button primary" href="/tradebook">Tradebook / P&amp;L</a>
+            <button id="refresh-button" class="button ghost" type="button" aria-label="Refresh holdings" title="Refresh holdings">⟳</button>
+          </div>
         </div>
 
         <form class="filter-form" method="get">
@@ -48,19 +51,19 @@
         <section class="kpi-grid">
           <article class="kpi-card">
             <span class="label">Invested Amount</span>
-            <strong>₹{{ invested_value|format_int }}</strong>
+            <strong id="kpi-invested">₹{{ invested_value|format_int }}</strong>
           </article>
           <article class="kpi-card">
             <span class="label">Current Value</span>
-            <strong>₹{{ portfolio_value|format_int }}</strong>
+            <strong id="kpi-portfolio-value">₹{{ portfolio_value|format_int }}</strong>
           </article>
           <article class="kpi-card">
             <span class="label">Total P&amp;L</span>
-            <strong class="{% if total_pnl >= 0 %}positive{% else %}negative{% endif %}">₹{{ total_pnl|format_signed }}</strong>
+            <strong id="kpi-total-pnl" class="{% if total_pnl >= 0 %}positive{% else %}negative{% endif %}">₹{{ total_pnl|format_signed }}</strong>
           </article>
           <article class="kpi-card">
             <span class="label">Profit %</span>
-            <strong class="{% if total_profit_pct >= 0 %}positive{% else %}negative{% endif %}">{{ total_profit_pct|format_signed }}%</strong>
+            <strong id="kpi-total-profit-pct" class="{% if total_profit_pct >= 0 %}positive{% else %}negative{% endif %}">{{ total_profit_pct|format_signed }}%</strong>
           </article>
         </section>
 
@@ -125,4 +128,5 @@
       </main>
     </div>
   </body>
+  <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 </html>
