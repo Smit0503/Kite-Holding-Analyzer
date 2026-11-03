@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Portfolio holdings, P&L, and asset-class overview for your Zerodha investment dashboard.">
+    <title>Portfolio Holdings</title>
+    <style>
+      /* Hallmark · v2.0.0 */
+      html, body { overflow-x: clip; }
+      :focus-visible {
+        outline: 2px solid var(--color-focus);
+        outline-offset: 2px;
+      }
+      a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+      button:active, a:active { opacity: 0.92; transform: translateY(0); }
+      button:disabled, input:disabled, select:disabled { opacity: 0.68; cursor: not-allowed; }
+    </style>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">Portfolio Holdings</div>
+        <div class="header-actions">
+          <span class="chip">{{ user_name }}</span>
+          <a class="button ghost" href="/logout">Logout</a>
+        </div>
+      </header>
+
+      <main class="panel">
+        <div class="toolbar">
+          <h1>Portfolio Summary</h1>
+          <a class="button primary" href="/tradebook">Tradebook / P&amp;L</a>
+        </div>
+
+        <form class="filter-form" method="get">
+          <label for="filter">Filter</label>
+          <select id="filter" name="filter" onchange="this.form.submit()">
+            <option value="all" {% if asset_filter == 'all' %}selected{% endif %}>All</option>
+            <option value="equity" {% if asset_filter == 'equity' %}selected{% endif %}>Equity</option>
+            <option value="debt" {% if asset_filter == 'debt' %}selected{% endif %}>Debt</option>
+            <option value="mf" {% if asset_filter == 'mf' %}selected{% endif %}>MF</option>
+            <option value="metal" {% if asset_filter == 'metal' %}selected{% endif %}>Metal</option>
+          </select>
+        </form>
+
+        <section class="kpi-grid">
+          <article class="kpi-card">
+            <span class="label">Invested Amount</span>
+            <strong>₹{{ invested_value|format_int }}</strong>
+          </article>
+          <article class="kpi-card">
+            <span class="label">Current Value</span>
+            <strong>₹{{ portfolio_value|format_int }}</strong>
+          </article>
+          <article class="kpi-card">
+            <span class="label">Total P&amp;L</span>
+            <strong class="{% if total_pnl >= 0 %}positive{% else %}negative{% endif %}">₹{{ total_pnl|format_signed }}</strong>
+          </article>
+          <article class="kpi-card">
+            <span class="label">Profit %</span>
+            <strong class="{% if total_profit_pct >= 0 %}positive{% else %}negative{% endif %}">{{ total_profit_pct|format_signed }}%</strong>
+          </article>
+        </section>
+
+        <section class="asset-grid">
+          {% for asset_key in ['equity', 'debt', 'mf', 'metal'] %}
+            {% set agg = aggregate_by_asset.get(asset_key, {'invested': 0.0, 'current': 0.0, 'pnl': 0.0}) %}
+            {% set pct = ((agg.current - agg.invested) / agg.invested * 100) if agg.invested else 0.0 %}
+            <article class="kpi-card compact">
+              <span class="label">{{ asset_key|upper }}</span>
+              <strong>₹{{ agg.current|format_int }}</strong>
+              <div class="meta-lines">
+                <span>Invested: ₹{{ agg.invested|format_int }}</span>
+                <span>P&amp;L: <span class="{% if agg.pnl >= 0 %}positive{% else %}negative{% endif %}">₹{{ agg.pnl|format_signed }}</span></span>
+                <span>Profit %: <span class="{% if pct >= 0 %}positive{% else %}negative{% endif %}">{{ pct|format_signed }}%</span></span>
+              </div>
+            </article>
+          {% endfor %}
+        </section>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Asset</th>
+                <th>Qty</th>
+                <th>Invested</th>
+                <th>Current Value</th>
+                <th>Purchase Date</th>
+                <th>Avg Price</th>
+                <th>LTP</th>
+                <th>Day Change</th>
+                <th>P&amp;L</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% if rows %}
+                {% for row in rows %}
+                  {% set invested = row.quantity * row.average_price %}
+                  {% set current_value = row.quantity * row.ltp %}
+                  <tr>
+                    <td>{{ row.tradingsymbol }}</td>
+                    <td>{{ row.asset_type|upper }}</td>
+                    <td>{{ row.quantity|format_int }}</td>
+                    <td>₹{{ invested|format_int }}</td>
+                    <td>₹{{ current_value|format_int }}</td>
+                    <td>{{ row.purchase_date }}</td>
+                    <td>₹{{ row.average_price|format_price }}</td>
+                    <td>₹{{ row.ltp|format_price }}</td>
+                    <td class="{% if row.day_change > 0 %}positive{% elif row.day_change < 0 %}negative{% endif %}">{{ row.day_change|format_signed }}</td>
+                    <td class="{% if row.pnl > 0 %}positive{% elif row.pnl < 0 %}negative{% endif %}">{{ row.pnl|format_signed }}</td>
+                  </tr>
+                {% endfor %}
+              {% else %}
+                <tr>
+                  <td colspan="10" class="empty">No holdings found.</td>
+                </tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>

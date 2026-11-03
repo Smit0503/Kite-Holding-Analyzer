@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Review tradebook activity, realized P&L, and buy-date entries across your holdings.">
+    <title>Tradebook / P&amp;L</title>
+    <style>
+      /* Hallmark · v2.0.0 */
+      html, body { overflow-x: clip; }
+      :focus-visible {
+        outline: 2px solid var(--color-focus);
+        outline-offset: 2px;
+      }
+      a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+      button:active, a:active { opacity: 0.92; transform: translateY(0); }
+      button:disabled, input:disabled, select:disabled { opacity: 0.68; cursor: not-allowed; }
+    </style>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+  </head>
+  <body>
+    <div class="shell narrow-shell">
+      <header class="topbar">
+        <div class="brand">Tradebook / P&amp;L</div>
+        <a class="button ghost" href="/holdings">Back to Holdings</a>
+      </header>
+
+      <main class="panel">
+        <form class="date-form" method="get" action="/tradebook">
+          <label>
+            From
+            <input type="date" name="from_date" value="{{ from_date }}">
+          </label>
+          <label>
+            To
+            <input type="date" name="to_date" value="{{ to_date }}">
+          </label>
+          <button type="submit" class="button primary">Fetch</button>
+        </form>
+
+        {% if range_note %}
+          <div class="notice">{{ range_note }}</div>
+        {% endif %}
+
+        <div class="summary-row">
+          <span>Total realized P&amp;L</span>
+          <strong class="{% if total_pnl >= 0 %}positive{% else %}negative{% endif %}">₹{{ total_pnl|format_signed }}</strong>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Sell Date</th>
+                <th>Purchase Date</th>
+                <th>Qty</th>
+                <th>Sell Price</th>
+                <th>Buy Price</th>
+                <th>P&amp;L</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% if trade_rows %}
+                {% for row in trade_rows %}
+                  <tr>
+                    <td>{{ row.symbol }}</td>
+                    <td>{{ row.date }}</td>
+                    <td>{{ row.purchase_date }}</td>
+                    <td>{{ row.quantity|format_int }}</td>
+                    <td>₹{{ row.sell_price|format_price }}</td>
+                    <td>₹{{ row.buy_price|format_price }}</td>
+                    <td class="{% if row.pnl >= 0 %}positive{% else %}negative{% endif %}">{{ row.pnl|format_signed }}</td>
+                  </tr>
+                {% endfor %}
+              {% else %}
+                <tr>
+                  <td colspan="7" class="empty">No tradebook entries in the selected range.</td>
+                </tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>
