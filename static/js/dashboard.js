@@ -26,6 +26,15 @@ function setTextIfPresent(id, value) {
   }
 }
 
+function setRefreshStatus(message, type = 'info') {
+  const el = document.getElementById('refresh-status');
+  if (!el) return;
+  el.textContent = message;
+  el.classList.remove('is-success', 'is-error');
+  if (type === 'success') el.classList.add('is-success');
+  if (type === 'error') el.classList.add('is-error');
+}
+
 function updateHoldings(data) {
   const payload = data || {};
   const rows = Array.isArray(payload.rows) ? payload.rows : [];
@@ -121,6 +130,8 @@ async function refreshData() {
     refreshButton.title = 'Refreshing...';
   }
 
+  setRefreshStatus('Refreshing portfolio data…');
+
   try {
     const response = await fetch('/api/refresh', { cache: 'no-store' });
     const data = await response.json();
@@ -128,9 +139,10 @@ async function refreshData() {
       throw new Error(data.error || 'Refresh failed');
     }
     updateHoldings(data);
+    setRefreshStatus('Portfolio refreshed successfully.', 'success');
   } catch (error) {
     console.error('Refresh error:', error);
-    window.alert(`Error refreshing data: ${error.message}`);
+    setRefreshStatus(`Refresh failed: ${error.message}`, 'error');
   } finally {
     if (refreshButton) {
       refreshButton.disabled = false;
@@ -144,5 +156,6 @@ document.addEventListener('DOMContentLoaded', function () {
   if (refreshButton) {
     refreshButton.addEventListener('click', refreshData);
   }
+  setRefreshStatus('Loading portfolio data…');
   refreshData();
 });

@@ -30,11 +30,14 @@
 
       <main class="panel">
         <div class="toolbar">
-          <h1 id="summary-title">Portfolio Summary</h1>
-          <div class="toolbar-actions">
+          <div class="toolbar-actions toolbar-actions--right">
             <a class="button primary" href="/tradebook">Tradebook / P&amp;L</a>
-            <button id="refresh-button" class="button ghost" type="button" aria-label="Refresh holdings" title="Refresh holdings">⟳</button>
+            <button id="refresh-button" class="button ghost icon-button" type="button" aria-label="Refresh holdings" title="Refresh holdings">⟳</button>
           </div>
+        </div>
+
+        <div id="refresh-status" class="refresh-status" role="status" aria-live="polite">
+          Portfolio data is up to date.
         </div>
 
         <form class="filter-form" method="get">
