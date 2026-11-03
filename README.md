@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Kite Holdings Analyzer
 
 This is a Python-based web application designed to analyze and display investment holdings using the Kite Connect API.
@@ -29,6 +28,3 @@ Follow these steps to set up the local development environment:
 - Flask
 - Python
 - Kite Connect API
-=======
-# Kite-Holding-Analyzer
->>>>>>> 6750bc46e61ff2f0f8b1af9603b038258574f74e
