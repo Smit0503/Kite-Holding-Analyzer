@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Trade Adjustments</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">Trade Adjustments</div>
+        <div class="header-actions">
+          <a class="button ghost" href="/holdings">Back to Holdings</a>
+        </div>
+      </header>
+
+      <main class="panel">
+        {% if error %}
+          <div class="notice">{{ error }}</div>
+        {% endif %}
+
+        <form method="post" class="filter-form" style="display:block; max-width: 720px;">
+          <div class="form-grid">
+            <label>
+              Symbol
+              <input name="symbol" required placeholder="e.g. INFY">
+            </label>
+            <label>
+              Asset class
+              <select name="asset_class">
+                <option value="equity">Equity</option>
+                <option value="debt">Debt</option>
+                <option value="metal">Metal</option>
+                <option value="mf">Mutual Fund</option>
+              </select>
+            </label>
+            <label>
+              Quantity
+              <input type="number" step="any" name="quantity" value="0" required>
+            </label>
+            <label>
+              Amount
+              <input type="number" step="any" name="amount" value="0" required>
+            </label>
+            <label>
+              Purchase date
+              <input type="date" name="purchase_date" required>
+            </label>
+            <label>
+              Reason
+              <input name="reason" placeholder="Bonus / Demerger / IPO / Other">
+            </label>
+          </div>
+          <label>
+            Notes
+            <textarea name="notes" rows="3" placeholder="Optional details"></textarea>
+          </label>
+          <div class="toolbar-actions" style="margin-top: 12px;">
+            <button class="button primary" type="submit">Save adjustment</button>
+          </div>
+        </form>
+
+        <div class="table-wrap" style="margin-top: 32px;">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Asset</th>
+                <th>Qty</th>
+                <th>Amount</th>
+                <th>Date</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% if adjustments %}
+                {% for row in adjustments %}
+                  <tr>
+                    <td>{{ row.symbol }}</td>
+                    <td>{{ row.asset_class|upper }}</td>
+                    <td>{{ row.quantity }}</td>
+                    <td>₹{{ row.amount|float|round(2) }}</td>
+                    <td>{{ row.purchase_date }}</td>
+                    <td>{{ row.reason or 'N/A' }}</td>
+                  </tr>
+                {% endfor %}
+              {% else %}
+                <tr><td colspan="6" class="empty">No adjustments yet.</td></tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>

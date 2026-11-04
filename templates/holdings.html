@@ -30,25 +30,31 @@
 
       <main class="panel">
         <div class="toolbar">
+          <div id="refresh-status" class="refresh-status" role="status" aria-live="polite">
+          Portfolio data is up to date.
+          </div>
           <div class="toolbar-actions toolbar-actions--right">
             <a class="button primary" href="/tradebook">Tradebook / P&amp;L</a>
+            <button id="refresh-tradebook-button" class="button ghost icon-button tradebook-refresh-button" type="button" aria-label="Refresh tradebook" title="Refresh tradebook">⇄</button>
             <button id="refresh-button" class="button ghost icon-button" type="button" aria-label="Refresh holdings" title="Refresh holdings">⟳</button>
           </div>
         </div>
 
-        <div id="refresh-status" class="refresh-status" role="status" aria-live="polite">
-          Portfolio data is up to date.
-        </div>
+        
 
-        <form class="filter-form" method="get">
-          <label for="filter">Filter</label>
-          <select id="filter" name="filter" onchange="this.form.submit()">
-            <option value="all" {% if asset_filter == 'all' %}selected{% endif %}>All</option>
-            <option value="equity" {% if asset_filter == 'equity' %}selected{% endif %}>Equity</option>
-            <option value="debt" {% if asset_filter == 'debt' %}selected{% endif %}>Debt</option>
-            <option value="mf" {% if asset_filter == 'mf' %}selected{% endif %}>MF</option>
-            <option value="metal" {% if asset_filter == 'metal' %}selected{% endif %}>Metal</option>
-          </select>
+        <form id="asset-filter-form" class="filter-form" method="get">
+          <span class="filter-form-title">Assets</span>
+          <div class="multi-filter-group">
+            {% for asset_key in ['all', 'equity', 'debt', 'mf', 'metal'] %}
+              {% set checked = 'all' in asset_filter_selected or asset_key in asset_filter_selected if asset_filter_selected is defined else asset_filter == asset_key %}
+              {% if asset_key == 'all' %}
+                <label class="filter-pill"><input type="checkbox" name="filter" value="all" {% if asset_filter == 'all' or 'all' in (asset_filter_selected or []) %}checked{% endif %}> All</label>
+              {% else %}
+                <label class="filter-pill"><input type="checkbox" name="filter" value="{{ asset_key }}" {% if asset_key in (asset_filter_selected or []) or (asset_filter == asset_key and asset_filter != 'all') %}checked{% endif %}> {{ asset_key|capitalize }}</label>
+              {% endif %}
+            {% endfor %}
+            <button type="submit" class="button primary small filter-apply-button">Apply filters</button>
+          </div>
         </form>
 
         <section class="kpi-grid">
@@ -60,13 +66,17 @@
             <span class="label">Current Value</span>
             <strong id="kpi-portfolio-value">₹{{ portfolio_value|format_int }}</strong>
           </article>
-          <article class="kpi-card">
+          <article class="kpi-card kpi-card-total">
             <span class="label">Total P&amp;L</span>
             <strong id="kpi-total-pnl" class="{% if total_pnl >= 0 %}positive{% else %}negative{% endif %}">₹{{ total_pnl|format_signed }}</strong>
+            <div class="meta-lines compact-subline">
+              <span class="kpi-subvalue {% if total_profit_pct >= 0 %}positive{% else %}negative{% endif %}">Chg %: {{ total_profit_pct|format_signed }}%</span>
+              <span class="kpi-subvalue xirr-value {% if portfolio_xirr >= 0 %}positive{% else %}negative{% endif %}">XIRR: {{ portfolio_xirr|round(2) }}%</span>
+            </div>
           </article>
           <article class="kpi-card">
-            <span class="label">Profit %</span>
-            <strong id="kpi-total-profit-pct" class="{% if total_profit_pct >= 0 %}positive{% else %}negative{% endif %}">{{ total_profit_pct|format_signed }}%</strong>
+            <span class="label">Day P&amp;L</span>
+            <strong id="kpi-total-profit-pct" class="{% if day_pnl >= 0 %}positive{% else %}negative{% endif %}">₹{{ day_pnl|format_signed }}</strong>
           </article>
         </section>
 
@@ -74,13 +84,15 @@
           {% for asset_key in ['equity', 'debt', 'mf', 'metal'] %}
             {% set agg = aggregate_by_asset.get(asset_key, {'invested': 0.0, 'current': 0.0, 'pnl': 0.0}) %}
             {% set pct = ((agg.current - agg.invested) / agg.invested * 100) if agg.invested else 0.0 %}
+            {% set asset_xirr = asset_xirr.get(asset_key, 0.0) %}
             <article class="kpi-card compact">
               <span class="label">{{ asset_key|upper }}</span>
               <strong>₹{{ agg.current|format_int }}</strong>
               <div class="meta-lines">
                 <span>Invested: ₹{{ agg.invested|format_int }}</span>
                 <span>P&amp;L: <span class="{% if agg.pnl >= 0 %}positive{% else %}negative{% endif %}">₹{{ agg.pnl|format_signed }}</span></span>
-                <span>Profit %: <span class="{% if pct >= 0 %}positive{% else %}negative{% endif %}">{{ pct|format_signed }}%</span></span>
+                <span>Chg %: <span class="{% if pct >= 0 %}positive{% else %}negative{% endif %}">{{ pct|format_signed }}%</span></span>
+                <span>XIRR: <span class="{% if asset_xirr >= 0 %}positive{% else %}negative{% endif %}">{{ asset_xirr|round(2) }}%</span></span>
               </div>
             </article>
           {% endfor %}
@@ -90,16 +102,88 @@
           <table>
             <thead>
               <tr>
-                <th>Symbol</th>
-                <th>Asset</th>
-                <th>Qty</th>
-                <th>Invested</th>
-                <th>Current Value</th>
-                <th>Purchase Date</th>
-                <th>Avg Price</th>
-                <th>LTP</th>
-                <th>Day Change</th>
-                <th>P&amp;L</th>
+                <th data-sort-key="symbol" aria-sort="none">
+                  <button type="button" class="sort-button" data-sort-key="symbol" aria-label="Sort by symbol">
+                    <span class="sort-label">Symbol</span>
+                    <span class="sort-arrows" aria-hidden="true">
+                      <span class="sort-arrow sort-arrow-up">▲</span>
+                      <span class="sort-arrow sort-arrow-down">▼</span>
+                    </span>
+                  </button>
+                </th>
+                <th data-sort-key="asset" aria-sort="none">
+                  <button type="button" class="sort-button" data-sort-key="asset" aria-label="Sort by asset">
+                    <span class="sort-label">Asset</span>
+                    <span class="sort-arrows" aria-hidden="true">
+                      <span class="sort-arrow sort-arrow-up">▲</span>
+                      <span class="sort-arrow sort-arrow-down">▼</span>
+                    </span>
+                  </button>
+                </th>
+                <th data-sort-key="qty" aria-sort="none">
+                  <button type="button" class="sort-button" data-sort-key="qty" aria-label="Sort by quantity">
+                    <span class="sort-label">Qty</span>
+                    <span class="sort-arrows" aria-hidden="true">
+                      <span class="sort-arrow sort-arrow-up">▲</span>
+                      <span class="sort-arrow sort-arrow-down">▼</span>
+                    </span>
+                  </button>
+                </th>
+                <th data-sort-key="invested" aria-sort="none">
+                  <button type="button" class="sort-button" data-sort-key="invested" aria-label="Sort by invested amount">
+                    <span class="sort-label">Invested</span>
+                    <span class="sort-arrows" aria-hidden="true">
+                      <span class="sort-arrow sort-arrow-up">▲</span>
+                      <span class="sort-arrow sort-arrow-down">▼</span>
+                    </span>
+                  </button>
+                </th>
+                <th data-sort-key="current_value" aria-sort="none">
+                  <button type="button" class="sort-button" data-sort-key="current_value" aria-label="Sort by current value">
+                    <span class="sort-label">Current Value</span>
+                    <span class="sort-arrows" aria-hidden="true">
+                      <span class="sort-arrow sort-arrow-up">▲</span>
+                      <span class="sort-arrow sort-arrow-down">▼</span>
+                    </span>
+                  </button>
+                </th>
+                <th data-sort-key="average_price" aria-sort="none">
+                  <button type="button" class="sort-button" data-sort-key="average_price" aria-label="Sort by average price">
+                    <span class="sort-label">Avg Price</span>
+                    <span class="sort-arrows" aria-hidden="true">
+                      <span class="sort-arrow sort-arrow-up">▲</span>
+                      <span class="sort-arrow sort-arrow-down">▼</span>
+                    </span>
+                  </button>
+                </th>
+                <th data-sort-key="ltp" aria-sort="none">
+                  <button type="button" class="sort-button" data-sort-key="ltp" aria-label="Sort by LTP">
+                    <span class="sort-label">LTP</span>
+                    <span class="sort-arrows" aria-hidden="true">
+                      <span class="sort-arrow sort-arrow-up">▲</span>
+                      <span class="sort-arrow sort-arrow-down">▼</span>
+                    </span>
+                  </button>
+                </th>
+                <th data-sort-key="day_change" aria-sort="none">
+                  <button type="button" class="sort-button" data-sort-key="day_change" aria-label="Sort by day change">
+                    <span class="sort-label">Day Change</span>
+                    <span class="sort-arrows" aria-hidden="true">
+                      <span class="sort-arrow sort-arrow-up">▲</span>
+                      <span class="sort-arrow sort-arrow-down">▼</span>
+                    </span>
+                  </button>
+                </th>
+                <th data-sort-key="pnl" aria-sort="none">
+                  <button type="button" class="sort-button" data-sort-key="pnl" aria-label="Sort by profit and loss">
+                    <span class="sort-label">P&amp;L</span>
+                    <span class="sort-arrows" aria-hidden="true">
+                      <span class="sort-arrow sort-arrow-up">▲</span>
+                      <span class="sort-arrow sort-arrow-down">▼</span>
+                    </span>
+                  </button>
+                </th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -107,17 +191,28 @@
                 {% for row in rows %}
                   {% set invested = row.quantity * row.average_price %}
                   {% set current_value = row.quantity * row.ltp %}
-                  <tr>
+                  <tr
+                    data-sort-row="true"
+                    data-symbol="{{ row.tradingsymbol }}"
+                    data-asset="{{ row.asset_type|upper }}"
+                    data-qty="{{ row.quantity }}"
+                    data-invested="{{ invested }}"
+                    data-current-value="{{ current_value }}"
+                    data-average-price="{{ row.average_price }}"
+                    data-ltp="{{ row.ltp }}"
+                    data-day-change="{{ row.day_change }}"
+                    data-pnl="{{ row.pnl }}"
+                  >
                     <td>{{ row.tradingsymbol }}</td>
                     <td>{{ row.asset_type|upper }}</td>
                     <td>{{ row.quantity|format_int }}</td>
                     <td>₹{{ invested|format_int }}</td>
                     <td>₹{{ current_value|format_int }}</td>
-                    <td>{{ row.purchase_date }}</td>
                     <td>₹{{ row.average_price|format_price }}</td>
                     <td>₹{{ row.ltp|format_price }}</td>
                     <td class="{% if row.day_change > 0 %}positive{% elif row.day_change < 0 %}negative{% endif %}">{{ row.day_change|format_signed }}</td>
                     <td class="{% if row.pnl > 0 %}positive{% elif row.pnl < 0 %}negative{% endif %}">{{ row.pnl|format_signed }}</td>
+                    <td><button type="button" class="symbol-options-button" data-symbol="{{ row.tradingsymbol }}" aria-label="Open symbol options for {{ row.tradingsymbol }}">⋯</button></td>
                   </tr>
                 {% endfor %}
               {% else %}
@@ -127,6 +222,56 @@
               {% endif %}
             </tbody>
           </table>
+        </div>
+
+        <div id="breakdown-modal" class="modal hidden" aria-hidden="true">
+          <div class="modal-backdrop" data-close-modal="true"></div>
+          <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="breakdown-title">
+            <div class="modal-header">
+              <h3 id="breakdown-title">Breakdown</h3>
+              <button type="button" class="modal-close" data-close-modal="true" aria-label="Close breakdown">×</button>
+            </div>
+            <div id="breakdown-content" class="breakdown-content"></div>
+          </div>
+        </div>
+
+        <div id="discrepancy-modal" class="modal hidden" aria-hidden="true">
+          <div class="modal-backdrop" data-close-modal="true"></div>
+          <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="discrepancy-title">
+            <div class="modal-header">
+              <h3 id="discrepancy-title">Discrepancy</h3>
+              <button type="button" class="modal-close" data-close-modal="true" aria-label="Close discrepancy">×</button>
+            </div>
+            <form id="discrepancy-form" class="form-grid">
+              <label>
+                Symbol
+                <input id="discrepancy-symbol" name="symbol" required>
+              </label>
+              <label>
+                Quantity
+                <input type="number" name="quantity" step="any" value="0" required>
+              </label>
+              <label>
+                Amount
+                <input type="number" name="amount" step="any" value="0" required>
+              </label>
+              <label>
+                Purchase date
+                <input type="date" name="purchase_date" required>
+              </label>
+              <label>
+                Reason
+                <input name="reason" value="DISCREPANCY" required>
+              </label>
+              <label style="grid-column: 1 / -1;">
+                Note
+                <textarea name="notes" placeholder="Optional note"></textarea>
+              </label>
+              <div class="toolbar-actions" style="grid-column: 1 / -1;">
+                <button type="submit" class="button primary">Save discrepancy</button>
+              </div>
+            </form>
+          </div>
         </div>
       </main>
     </div>

@@ -1,4 +1,5 @@
 import math
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List
@@ -58,6 +59,29 @@ def _symbol_key(item: Dict[str, Any]) -> str:
     return str(item.get("tradingsymbol") or item.get("symbol") or "").upper().strip()
 
 
+def _looks_like_debt_symbol(symbol: str) -> bool:
+    normalized = str(symbol or "").upper().strip()
+    if not normalized:
+        return False
+
+    if re.search(r"(?:^|[^A-Z])(GILT|SDL|NCD|BOND|DEBT|TBILL|T-BILL|TREASURY|NOTE|DEBENTURE)", normalized):
+        return True
+
+    compact = re.sub(r"[^A-Z0-9]", "", normalized)
+    return bool(re.match(r"^\d+[A-Z]{3,}\d{2,}[A-Z0-9-]*$", compact))
+
+
+def _looks_like_metal_symbol(symbol: str) -> bool:
+    normalized = str(symbol or "").upper().strip()
+    if not normalized:
+        return False
+    compact = re.sub(r"[^A-Z0-9]", "", normalized)
+    metal_tokens = ["SGB", "GOLD", "SILVER", "METAL", "BULLION", "PRECIOUS", "ETF"]
+    if any(token in normalized for token in metal_tokens):
+        return True
+    return bool(re.match(r"^(?:SGB|GOLD|SILVER|METAL)[A-Z0-9-]*$", compact))
+
+
 def classify_asset(item: Dict[str, Any]) -> str:
     text = " ".join(
         [
@@ -74,14 +98,16 @@ def classify_asset(item: Dict[str, Any]) -> str:
     ).upper()
 
     raw = str(item.get("instrument_type") or item.get("exchange") or item.get("segment") or "").upper()
+    symbol = str(item.get("tradingsymbol") or item.get("symbol") or "")
+
     if item.get("is_mf") is True or "MF" in raw or "MUTUALFUND" in raw or "MUTFUND" in raw:
         return "mf"
 
-    if any(token in text for token in ["SGB", "GOLD", "SILVER", "METAL", "PRECIOUS", "BULLION", "GOLD ETF"]):
+    if any(token in text for token in ["SGB", "GOLD", "SILVER", "METAL", "PRECIOUS", "BULLION", "GOLD ETF", "SILVER ETF"]) or _looks_like_metal_symbol(symbol):
         return "metal"
     if any(token in text for token in ["MUTUAL", "MF", "MUTFUND", "FUND", "SCHEME", "NFO"]) or "MUTUALFUND" in text:
         return "mf"
-    if any(token in text for token in ["DEBT", "BOND", "NCD", "GILT", "SDL", "DEBENTURE", "TREASURY", "T-BILL", "TBILL"]):
+    if any(token in text for token in ["DEBT", "BOND", "NCD", "GILT", "SDL", "DEBENTURE", "TREASURY", "T-BILL", "TBILL", "NOTE"]) or _looks_like_debt_symbol(symbol):
         return "debt"
     if raw in {"MF", "MUTUALFUND", "MUTFUND", "NFO"}:
         return "mf"

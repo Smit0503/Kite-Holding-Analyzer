@@ -131,6 +131,12 @@ body {
   font-size: 1.2rem;
 }
 
+.tradebook-refresh-button {
+  border-color: rgba(69, 115, 255, 0.45);
+  background: rgba(69, 115, 255, 0.06);
+  color: #1f4fd7;
+}
+
 .refresh-status {
   display: inline-flex;
   align-items: center;
@@ -192,6 +198,11 @@ h1 {
   border: 1px solid transparent;
 }
 
+.button.small {
+  padding: var(--space-2xs) var(--space-sm);
+  font-size: 0.78rem;
+}
+
 .button:hover,
 .button:active {
   transform: translateY(-1px);
@@ -215,6 +226,51 @@ h1 {
   gap: var(--space-sm);
   flex-wrap: wrap;
   margin-bottom: var(--space-md);
+}
+
+.multi-filter-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+
+.filter-form-title {
+  color: var(--color-ink-soft);
+  font-weight: 700;
+}
+
+.filter-pill:has(input:checked) {
+  border-color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 10%, var(--color-paper));
+  color: var(--color-primary);
+}
+
+.filter-apply-button {
+  min-width: 96px;
+  margin-left: var(--space-xs);
+}
+
+.filter-form.is-applying .filter-apply-button {
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: var(--space-2xs) var(--space-xs);
+  border: 1px solid var(--color-rule);
+  border-radius: 999px;
+  background: var(--color-paper-2);
+  color: var(--color-ink-soft);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.filter-pill input {
+  margin: 0;
 }
 
 .filter-form label,
@@ -274,10 +330,14 @@ select:disabled {
   padding: var(--space-md) var(--space-sm);
 }
 
+.kpi-card-total {
+  min-height: 160px;
+}
+
 .kpi-card strong {
   display: block;
   margin-top: var(--space-sm);
-  font-size: clamp(1.2rem, 2vw, 1.8rem);
+  font-size: clamp(1.1rem, 2vw, 1.6rem);
   line-height: 1.2;
 }
 
@@ -298,6 +358,175 @@ select:disabled {
   color: var(--color-ink-soft);
   font-size: 0.8rem;
   line-height: 1.45;
+}
+
+.compact-subline {
+  margin-top: var(--space-xs);
+}
+
+.kpi-subvalue {
+  font-size: 0.86rem;
+  line-height: 1.3;
+}
+
+.xirr-value {
+  font-size: 0.86rem;
+}
+
+.symbol-options-button {
+  position: relative;
+  border: 1px solid var(--color-rule);
+  background: var(--color-panel-2);
+  color: var(--color-ink);
+  border-radius: 8px;
+  width: 32px;
+  height: 32px;
+  cursor: pointer;
+  font-size: 1.2rem;
+}
+
+.symbol-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  min-width: 170px;
+  background: var(--color-panel);
+  border: 1px solid var(--color-rule);
+  border-radius: 10px;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.15);
+  display: none;
+  z-index: 30;
+}
+
+.symbol-menu.is-open {
+  display: block;
+}
+
+.symbol-menu button {
+  display: block;
+  width: 100%;
+  padding: var(--space-xs) var(--space-sm);
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--color-ink);
+  font: inherit;
+}
+
+.symbol-menu button:hover {
+  background: var(--color-row-hover);
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+}
+
+.modal.hidden {
+  display: none;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(17, 24, 39, 0.48);
+}
+
+.modal-dialog {
+  position: relative;
+  width: min(760px, calc(100% - 24px));
+  max-height: 80vh;
+  overflow: auto;
+  background: var(--color-panel);
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.25);
+}
+
+.modal-header {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+  min-height: 42px;
+}
+
+.modal-close {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  border: 1px solid var(--color-rule);
+  background: transparent;
+  color: var(--color-ink);
+  border-radius: 8px;
+  width: 32px;
+  height: 32px;
+  cursor: pointer;
+  font-size: 1.4rem;
+  line-height: 1;
+}
+
+.discrepancy-alert {
+  border-color: rgba(176, 33, 33, 0.7) !important;
+  box-shadow: inset 0 0 0 1px rgba(176, 33, 33, 0.5);
+}
+
+.discrepancy-option {
+  color: #9f1c1c !important;
+  font-weight: 700;
+}
+
+.symbol-options-button.discrepancy-alert {
+  background: rgba(176, 33, 33, 0.06);
+}
+
+.breakdown-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.breakdown-table th,
+.breakdown-table td {
+  border-bottom: 1px solid var(--color-rule);
+  padding: 8px 6px;
+  font-size: 0.82rem;
+}
+
+.breakdown-content {
+  color: var(--color-ink);
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-md);
+}
+
+label {
+  display: grid;
+  gap: var(--space-2xs);
+  color: var(--color-ink-soft);
+  font-weight: 600;
+}
+
+textarea {
+  width: 100%;
+  min-height: 90px;
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  background: var(--color-paper-2);
+  color: var(--color-ink);
+  resize: vertical;
 }
 
 .table-wrap {
@@ -325,6 +554,59 @@ th {
   font-size: 0.76rem;
   font-weight: 600;
   line-height: 1.4;
+}
+
+.sort-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: var(--space-xs);
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sort-label {
+  white-space: nowrap;
+}
+
+.sort-arrows {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 12px;
+  font-size: 0.62rem;
+  line-height: 0.9;
+}
+
+.sort-arrow {
+  display: block;
+  opacity: 0.3;
+  color: var(--color-ink-soft);
+  transition: opacity 0.12s ease, color 0.12s ease, transform 0.12s ease;
+}
+
+.sort-arrow.is-active {
+  opacity: 1;
+  color: var(--color-accent);
+  font-weight: 700;
+}
+
+.sort-button.is-active .sort-label {
+  color: var(--color-ink);
+}
+
+th[aria-sort="ascending"] .sort-arrow-up,
+th[aria-sort="descending"] .sort-arrow-down {
+  opacity: 1;
+  color: var(--color-accent);
 }
 
 tbody tr:hover {

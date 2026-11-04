@@ -24,6 +24,11 @@ session.db
 *.db
 *.sqlite3
 
+# Zerodha tradebook imports and exported CSV files
+TradeBook/
+../TradeBook/
+*.csv
+
 # OS files
 .DS_Store
 Thumbs.db
