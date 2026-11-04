@@ -696,3 +696,9 @@ tbody tr:hover {
     align-items: flex-start;
   }
 } 
+.pnl-change {
+  margin-left: 4px;
+  font-size: 0.75em;
+  opacity: 0.75;
+  white-space: nowrap;
+}

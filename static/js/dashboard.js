@@ -297,7 +297,7 @@ function updateHoldings(data) {
   const tbody = document.querySelector('.table-wrap tbody');
   if (tbody) {
     if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="9" class="empty">No holdings found.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="11" class="empty">No holdings found.</td></tr>';
       renderSortIndicators();
       return;
     }
@@ -310,6 +310,8 @@ function updateHoldings(data) {
       const currentValue = quantity * ltp;
       const dayChange = Number(row.day_change || 0);
       const pnlValue = Number(row.pnl || 0);
+      const pnlPctValue = invested ? (pnlValue / invested) * 100 : 0;
+      const xirrValue = Number(row.xirr || 0);
       const symbol = row.tradingsymbol || row.symbol || 'N/A';
       const assetType = safeAssetType(row.asset_type || 'equity');
 
@@ -325,6 +327,8 @@ function updateHoldings(data) {
           data-ltp="${ltp}"
           data-day-change="${dayChange}"
           data-pnl="${pnlValue}"
+          data-pnl-pct="${pnlPctValue}"
+          data-xirr="${xirrValue}"
         >
           <td>${escapeHtml(symbol)}</td>
           <td>${escapeHtml(assetType.toUpperCase())}</td>
@@ -334,7 +338,11 @@ function updateHoldings(data) {
           <td>${formatMoney(averagePrice, 2)}</td>
           <td>${formatMoney(ltp, 2)}</td>
           <td class="${dayChange > 0 ? 'positive' : dayChange < 0 ? 'negative' : ''}">${formatSigned(dayChange)}</td>
-          <td class="${pnlValue > 0 ? 'positive' : pnlValue < 0 ? 'negative' : ''}">${formatSigned(pnlValue)}</td>
+          <td class="${pnlValue > 0 ? 'positive' : pnlValue < 0 ? 'negative' : ''}">
+            ${formatSigned(pnlValue)}
+            <small class="pnl-change">(${formatSigned(pnlPctValue)}%)</small>
+          </td>
+          <td class="${xirrValue > 0 ? 'positive' : xirrValue < 0 ? 'negative' : ''}">${formatSigned(xirrValue)}%</td>
           <td><button type="button" class="symbol-options-button" data-symbol="${escapeHtml(symbol)}" aria-label="Open symbol options for ${escapeHtml(symbol)}">⋯</button></td>
         </tr>
       `;

@@ -183,6 +183,15 @@
                     </span>
                   </button>
                 </th>
+                <th data-sort-key="xirr" aria-sort="none">
+                  <button type="button" class="sort-button" data-sort-key="xirr" aria-label="Sort by XIRR">
+                    <span class="sort-label">XIRR</span>
+                    <span class="sort-arrows" aria-hidden="true">
+                      <span class="sort-arrow sort-arrow-up">▲</span>
+                      <span class="sort-arrow sort-arrow-down">▼</span>
+                    </span>
+                  </button>
+                </th>
                 <th>Action</th>
               </tr>
             </thead>
@@ -202,6 +211,7 @@
                     data-ltp="{{ row.ltp }}"
                     data-day-change="{{ row.day_change }}"
                     data-pnl="{{ row.pnl }}"
+                    data-xirr="{{ row.xirr }}"
                   >
                     <td>{{ row.tradingsymbol }}</td>
                     <td>{{ row.asset_type|upper }}</td>
@@ -212,12 +222,13 @@
                     <td>₹{{ row.ltp|format_price }}</td>
                     <td class="{% if row.day_change > 0 %}positive{% elif row.day_change < 0 %}negative{% endif %}">{{ row.day_change|format_signed }}</td>
                     <td class="{% if row.pnl > 0 %}positive{% elif row.pnl < 0 %}negative{% endif %}">{{ row.pnl|format_signed }}</td>
+                    <td class="{% if row.xirr > 0 %}positive{% elif row.xirr < 0 %}negative{% endif %}">{{ row.xirr|format_signed }}%</td>
                     <td><button type="button" class="symbol-options-button" data-symbol="{{ row.tradingsymbol }}" aria-label="Open symbol options for {{ row.tradingsymbol }}">⋯</button></td>
                   </tr>
                 {% endfor %}
               {% else %}
                 <tr>
-                  <td colspan="10" class="empty">No holdings found.</td>
+                  <td colspan="11" class="empty">No holdings found.</td>
                 </tr>
               {% endif %}
             </tbody>

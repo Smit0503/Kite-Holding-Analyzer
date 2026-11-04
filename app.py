@@ -63,9 +63,7 @@ def xnpv(rate, cashflows):
     for dt, amount in cashflows:
         if dt is None:
             continue
-        days = (today - dt.date()).days
-        if days < 0:
-            days = 0
+        days = (dt.date() - today).days
         total += amount / ((1 + rate) ** (days / 365.0)) if rate != -1 else amount
     return total
 
@@ -80,6 +78,10 @@ def xirr(cashflows):
 
     low = -0.9999
     high = 10.0
+    while xnpv(high, cashflows) > 0 and high < 10000.0:
+        high = high * 10.0
+    if xnpv(high, cashflows) > 0:
+        return 0.0
     for _ in range(200):
         mid = (low + high) / 2
         value = xnpv(mid, cashflows)
@@ -108,13 +110,29 @@ def calculate_symbol_xirr(symbol, asset_class, current_price, current_quantity, 
             "SELECT trade_type, quantity, price, trade_date FROM trade_imports WHERE symbol = ? AND asset_class = ? ORDER BY date(trade_date) ASC",
             (symbol.upper(), asset_class.lower()),
         ).fetchall()
-    adjustments = conn.execute(
-        "SELECT quantity, amount, purchase_date FROM trade_adjustments WHERE symbol = ? AND asset_class = ? ORDER BY date(purchase_date) ASC",
-        (symbol.upper(), asset_class.lower()),
-    ).fetchall()
+    if not rows:
+        rows = conn.execute(
+            "SELECT trade_type, quantity, price, trade_date FROM trade_imports WHERE symbol = ? ORDER BY date(trade_date) ASC",
+            (symbol.upper(),),
+        ).fetchall()
+    if isin:
+        adjustments = conn.execute(
+            "SELECT quantity, amount, purchase_date FROM trade_adjustments WHERE (isin = ? OR symbol = ?) AND asset_class = ? ORDER BY date(purchase_date) ASC",
+            (isin, symbol.upper(), asset_class.lower()),
+        ).fetchall()
+    else:
+        adjustments = conn.execute(
+            "SELECT quantity, amount, purchase_date FROM trade_adjustments WHERE symbol = ? AND asset_class = ? ORDER BY date(purchase_date) ASC",
+            (symbol.upper(), asset_class.lower()),
+        ).fetchall()
+    if not adjustments:
+        adjustments = conn.execute(
+            "SELECT quantity, amount, purchase_date FROM trade_adjustments WHERE symbol = ? ORDER BY date(purchase_date) ASC",
+            (symbol.upper(),),
+        ).fetchall()
     conn.close()
 
-    day_totals = {}
+    lots = []
     for row in rows:
         try:
             trade_date = datetime.fromisoformat(str(row["trade_date"])[:19])
@@ -123,47 +141,77 @@ def calculate_symbol_xirr(symbol, asset_class, current_price, current_quantity, 
                 trade_date = datetime.strptime(str(row["trade_date"]), "%Y-%m-%d")
             except ValueError:
                 continue
-        day_key = trade_date.date().isoformat()
-        day_totals.setdefault(day_key, {"BUY": 0.0, "SELL": 0.0})
-        qty = float(row["quantity"] or 0)
-        if row["trade_type"] == "BUY":
-            day_totals[day_key]["BUY"] += qty
-        else:
-            day_totals[day_key]["SELL"] += qty
-
-    cashflows = []
-    for row in rows:
-        trade_date = row["trade_date"]
-        try:
-            dt = datetime.fromisoformat(trade_date[:19])
-        except ValueError:
-            try:
-                dt = datetime.strptime(trade_date, "%Y-%m-%d")
-            except ValueError:
-                continue
-        day_key = dt.date().isoformat()
-        same_day_mis = day_totals.get(day_key, {}).get("BUY", 0.0) > 0 and day_totals.get(day_key, {}).get("SELL", 0.0) > 0
-        if same_day_mis:
-            continue
-        qty = float(row["quantity"] or 0)
-        price = float(row["price"] or 0)
-        if row["trade_type"] == "BUY":
-            cashflows.append((dt, -(qty * price)))
-        else:
-            cashflows.append((dt, (qty * price)))
+        lots.append({
+            "date": trade_date,
+            "type": str(row["trade_type"] or "").upper(),
+            "quantity": float(row["quantity"] or 0),
+            "price": float(row["price"] or 0),
+        })
 
     for row in adjustments:
         try:
-            dt = datetime.strptime(row["purchase_date"], "%Y-%m-%d")
+            trade_date = datetime.strptime(str(row["purchase_date"])[:10], "%Y-%m-%d")
         except ValueError:
             continue
-        cashflows.append((dt, -float(row["amount"] or 0)))
+        lots.append({
+            "date": trade_date,
+            "type": "BUY",
+            "quantity": float(row["quantity"] or 0),
+            "price": float(row["amount"] or 0),
+        })
+
+    remaining_lots = []
+    has_adjustments = bool(adjustments)
+    for lot in sorted(lots, key=lambda item: item["date"]):
+        trade_type = lot["type"]
+        quantity = lot["quantity"]
+        if trade_type == "BUY":
+            if quantity > 0 and lot["price"] > 0:
+                remaining_lots.append({
+                    "date": lot["date"],
+                    "quantity": quantity,
+                    "price": lot["price"],
+                })
+        elif trade_type == "SELL" and not has_adjustments:
+            sold = quantity
+            for remaining in remaining_lots:
+                if sold <= 0:
+                    break
+                matched = min(remaining["quantity"], sold)
+                remaining["quantity"] -= matched
+                sold -= matched
+        remaining_lots = [lot for lot in remaining_lots if lot["quantity"] > 0]
+
+    remaining_quantity = numeric(current_quantity)
+    cashflows = []
+    for lot in remaining_lots:
+        if remaining_quantity <= 0:
+            break
+        quantity = min(lot["quantity"], remaining_quantity)
+        cashflows.append((lot["date"], -(quantity * lot["price"])))
+        remaining_quantity -= quantity
 
     if not cashflows:
         return 0.0
 
     cashflows.append((datetime.utcnow(), current_quantity * current_price))
     return xirr(cashflows)
+
+
+def calculate_lot_xirr(purchase_date, quantity, purchase_price, current_price):
+    quantity = numeric(quantity)
+    purchase_price = numeric(purchase_price)
+    current_price = numeric(current_price)
+    if quantity <= 0 or purchase_price <= 0 or current_price <= 0:
+        return 0.0
+    try:
+        purchased_at = datetime.strptime(str(purchase_date)[:10], "%Y-%m-%d")
+    except ValueError:
+        return 0.0
+    return xirr([
+        (purchased_at, -(quantity * purchase_price)),
+        (datetime.utcnow(), quantity * current_price),
+    ])
 
 
 def calculate_weighted_xirr(rows):
@@ -577,35 +625,6 @@ def init_db():
     if "isin" not in adjustment_columns:
         conn.execute("ALTER TABLE trade_adjustments ADD COLUMN isin TEXT")
 
-    session_row = conn.execute(
-        "SELECT holdings_json, mf_holdings_json FROM session WHERE id = 1"
-    ).fetchone()
-    isin_by_symbol = {}
-    if session_row:
-        for payload_json in (session_row["holdings_json"], session_row["mf_holdings_json"]):
-            if not payload_json:
-                continue
-            try:
-                payload = json.loads(payload_json)
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if isinstance(payload, dict):
-                payload = payload.get("data") or []
-            if not isinstance(payload, list):
-                continue
-            for item in payload:
-                if not isinstance(item, dict):
-                    continue
-                symbol = str(item.get("tradingsymbol") or item.get("symbol") or item.get("fund") or item.get("scheme") or item.get("name") or "").upper().strip()
-                isin_value = extract_isin(item)
-                if symbol and isin_value:
-                    isin_by_symbol[symbol] = isin_value
-
-        for symbol, isin_value in isin_by_symbol.items():
-            conn.execute(
-                "UPDATE trade_adjustments SET isin = ? WHERE upper(symbol) = ? AND (isin IS NULL OR trim(isin) = '')",
-                (isin_value, symbol),
-            )
     conn.commit()
     conn.close()
 
@@ -644,6 +663,17 @@ def save_session_to_db(access_token=None, user=None, holdings=None, tradebook=No
     )
     conn.commit()
     conn.close()
+
+
+def refresh_mf_holdings():
+    if not SESSION.get("access_token") or not kite_client:
+        return SESSION.get("mf_holdings") or []
+    try:
+        mf_holdings = kite_client.get_mf_holdings(SESSION["access_token"])
+        return mf_holdings if isinstance(mf_holdings, list) else (SESSION.get("mf_holdings") or [])
+    except Exception as exc:
+        print(f"MF holdings refresh failed: {exc}")
+        return SESSION.get("mf_holdings") or []
 
 
 def get_default_date_window(days=90):
@@ -807,6 +837,13 @@ def holdings_page():
                 "ltp": metrics["ltp"],
                 "day_change": metrics["day_change"],
                 "pnl": metrics["pnl"],
+                "xirr": calculate_symbol_xirr(
+                    item.get("tradingsymbol") or item.get("fund") or item.get("scheme") or item.get("name") or "MF",
+                    asset_type,
+                    metrics["ltp"],
+                    quantity,
+                    extract_isin(item),
+                ),
                 "asset_type": asset_type,
                 "purchase_date": fifo_purchase_date_for_holding(item, tradebook),
             }
@@ -914,7 +951,7 @@ def api_mf_holdings():
     if not SESSION.get("access_token"):
         return jsonify({"error": "Not authenticated. Visit /login first."}), 401
     try:
-        mf_holdings = kite_client.get_mf_holdings(SESSION["access_token"])
+        mf_holdings = refresh_mf_holdings()
         SESSION["mf_holdings"] = mf_holdings
         save_session_to_db(access_token=SESSION["access_token"], user=SESSION.get("user"), holdings=SESSION.get("holdings"), mf_holdings=mf_holdings)
         return jsonify({"mf_holdings": mf_holdings}), 200
@@ -964,11 +1001,7 @@ def api_refresh():
 
     try:
         raw_holdings = kite_client.get_holdings(SESSION["access_token"])
-        mf_holdings = []
-        try:
-            mf_holdings = kite_client.get_mf_holdings(SESSION["access_token"])
-        except Exception:
-            mf_holdings = []
+        mf_holdings = refresh_mf_holdings()
 
         all_items = []
         if isinstance(raw_holdings, dict):
@@ -1004,6 +1037,13 @@ def api_refresh():
                 "ltp": normalized["ltp"],
                 "day_change": normalized["day_change"],
                 "pnl": normalized["pnl"],
+                "xirr": calculate_symbol_xirr(
+                    item.get("tradingsymbol") or item.get("fund") or item.get("scheme") or item.get("name") or "N/A",
+                    asset_type,
+                    normalized["ltp"],
+                    normalized["quantity"],
+                    extract_isin(item),
+                ),
                 "purchase_date": item.get("purchase_date") or "N/A",
             })
 
@@ -1082,11 +1122,15 @@ def api_symbol_breakdown(symbol):
 
     holdings = SESSION.get("holdings") or {}
     mf_holdings = SESSION.get("mf_holdings") or []
-    holdings_data = holdings.get("data") if isinstance(holdings, dict) else (holdings if isinstance(holdings, list) else [])
+    if isinstance(holdings, dict):
+        holdings_data = holdings.get("data") or holdings.get("holdings") or []
+    elif isinstance(holdings, list):
+        holdings_data = holdings
+    else:
+        holdings_data = []
     matched = find_holding_match(symbol, holdings_data, mf_holdings)
     if not isinstance(matched, dict):
         matched = None
-
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     isin_value = extract_isin(matched)
@@ -1121,11 +1165,13 @@ def api_symbol_breakdown(symbol):
             "price": float(row["price"] or 0),
         })
     for row in adjustments:
+        adjustment_quantity = float(row["quantity"] or 0)
+        adjustment_amount = float(row["price"] or 0)
         lots.append({
             "date": str(row["date"] or "").split("T")[0],
             "type": "BUY",
-            "quantity": float(row["quantity"] or 0),
-            "price": float(row["price"] or 0),
+            "quantity": adjustment_quantity,
+            "price": adjustment_amount,
             "notes": str(row["notes"] or "").strip(),
         })
 
@@ -1158,9 +1204,9 @@ def api_symbol_breakdown(symbol):
                 sold = float(lot["quantity"] or 0)
                 while sold > 0 and queue:
                     first = queue[0]
-                    matched = min(float(first["quantity"] or 0), sold)
-                    first["quantity"] -= matched
-                    sold -= matched
+                    matched_quantity = min(float(first["quantity"] or 0), sold)
+                    first["quantity"] -= matched_quantity
+                    sold -= matched_quantity
                     if first["quantity"] <= 0:
                         queue.pop(0)
         for row in queue:
@@ -1189,33 +1235,40 @@ def api_symbol_breakdown(symbol):
     if isinstance(matched, dict):
         qty = holding_quantity(matched)
         avg = numeric(matched.get("average_price") or matched.get("avg_price") or matched.get("average_nav") or matched.get("avg_nav") or matched.get("cost_price") or 0)
-        ltp = numeric(
-            matched.get("last_price")
-            or matched.get("ltp")
-            or matched.get("close_price")
-            or matched.get("nav")
-            or matched.get("last_nav")
-            or matched.get("current_nav")
-            or matched.get("price")
-            or matched.get("average_nav")
-            or matched.get("avg_nav")
-            or 0
-        )
-
+        ltp = numeric(normalize_holding_row(matched)["ltp"])
+        if ltp <= 0:
+            ltp = numeric(
+                matched.get("last_price")
+                or matched.get("ltp")
+                or matched.get("close_price")
+                or matched.get("nav")
+                or matched.get("price")
+                or 0
+            )
     for lot in remaining_lots:
         ev = float(lot["price"] or 0)
         lot["ltp"] = ltp
         lot["pnl"] = (ltp - ev) * float(lot["quantity"] or 0)
         lot["chg_pct"] = ((ltp - ev) / ev * 100) if ev else 0.0
-        lot["xirr"] = 0.0
+        lot["xirr"] = calculate_lot_xirr(lot["date"], lot["quantity"], ev, ltp)
         lot["cnc_status"] = "CNC"
+
+    symbol_xirr = 0.0
+    if isinstance(matched, dict) and ltp > 0 and qty > 0:
+        symbol_xirr = calculate_symbol_xirr(
+            symbol,
+            classify_asset(matched),
+            ltp,
+            qty,
+            extract_isin(matched),
+        )
 
     return jsonify({
         "symbol": symbol,
         "ltp": ltp,
         "pnl": (ltp - avg) * qty if qty and avg else 0.0,
         "chg_pct": ((ltp - avg) / avg * 100) if avg else 0.0,
-        "xirr": 0.0,
+        "xirr": symbol_xirr,
         "lots": remaining_lots,
     })
 
