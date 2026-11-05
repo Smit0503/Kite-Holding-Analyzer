@@ -99,22 +99,8 @@ def calculate_symbol_xirr(symbol, asset_class, current_price, current_quantity, 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     isin = (isin or "").upper().strip()
-    rows = []
-    if isin:
-        rows = conn.execute(
-            "SELECT trade_type, quantity, price, trade_date FROM trade_imports WHERE isin = ? AND asset_class = ? ORDER BY date(trade_date) ASC",
-            (isin, asset_class.lower()),
-        ).fetchall()
-    if not rows:
-        rows = conn.execute(
-            "SELECT trade_type, quantity, price, trade_date FROM trade_imports WHERE symbol = ? AND asset_class = ? ORDER BY date(trade_date) ASC",
-            (symbol.upper(), asset_class.lower()),
-        ).fetchall()
-    if not rows:
-        rows = conn.execute(
-            "SELECT trade_type, quantity, price, trade_date FROM trade_imports WHERE symbol = ? ORDER BY date(trade_date) ASC",
-            (symbol.upper(),),
-        ).fetchall()
+    rows = find_trade_import_rows(conn, symbol=symbol, isin=isin, asset_class=asset_class)
+    rows = sorted(rows, key=lambda row: str(row["trade_date"] or ""))
     if isin:
         adjustments = conn.execute(
             "SELECT quantity, amount, purchase_date FROM trade_adjustments WHERE (isin = ? OR symbol = ?) AND asset_class = ? ORDER BY date(purchase_date) ASC",
@@ -349,6 +335,31 @@ def normalize_symbol_key(value):
     return text
 
 
+def find_trade_import_rows(conn, symbol="", isin="", asset_class=""):
+    symbol = str(symbol or "").upper().strip()
+    isin = str(isin or "").upper().strip()
+    target_key = normalize_symbol_key(symbol)
+
+    rows = []
+    if isin:
+        rows = conn.execute(
+            "SELECT * FROM trade_imports WHERE upper(trim(isin)) = ?",
+            (isin,),
+        ).fetchall()
+    if rows:
+        return rows
+
+    candidate_rows = conn.execute("SELECT * FROM trade_imports").fetchall()
+    for row in candidate_rows:
+        if asset_class and str(row["asset_class"] or "").lower() != str(asset_class).lower():
+            continue
+        if normalize_symbol_key(row["symbol"]) == target_key:
+            rows.append(row)
+    if not rows and symbol:
+        rows = [row for row in candidate_rows if str(row["symbol"] or "").upper().strip() == symbol]
+    return rows
+
+
 def extract_isin(item):
     if not isinstance(item, dict):
         return ""
@@ -413,17 +424,7 @@ def get_tradebook_net_quantity(symbol, isin=""):
     conn.row_factory = sqlite3.Row
     symbol = (symbol or "").upper().strip()
     isin = (isin or "").upper().strip()
-    rows = []
-    if isin:
-        rows = conn.execute(
-            "SELECT trade_type, quantity FROM trade_imports WHERE isin = ? ORDER BY date(trade_date) ASC",
-            (isin,),
-        ).fetchall()
-    if not rows:
-        rows = conn.execute(
-            "SELECT trade_type, quantity FROM trade_imports WHERE symbol = ? ORDER BY date(trade_date) ASC",
-            (symbol,),
-        ).fetchall()
+    rows = find_trade_import_rows(conn, symbol=symbol, isin=isin)
     net_qty = 0.0
     for row in rows:
         qty = float(row["quantity"] or 0)
@@ -452,16 +453,7 @@ def get_breakdown_buy_quantity(symbol, isin=""):
     isin_value = (isin or "").upper().strip()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    if isin_value:
-        imports = conn.execute(
-            "SELECT symbol, isin, trade_date AS date, trade_type AS type, quantity, price FROM trade_imports WHERE isin = ? ORDER BY date(trade_date) ASC",
-            (isin_value,),
-        ).fetchall()
-    else:
-        imports = conn.execute(
-            "SELECT symbol, isin, trade_date AS date, trade_type AS type, quantity, price FROM trade_imports WHERE symbol = ? ORDER BY date(trade_date) ASC",
-            (symbol,),
-        ).fetchall()
+    imports = find_trade_import_rows(conn, symbol=symbol, isin=isin_value)
     if isin_value:
         adjustments = conn.execute(
             "SELECT symbol, purchase_date AS date, reason AS type, quantity, amount AS price, notes FROM trade_adjustments WHERE isin = ? OR symbol = ? ORDER BY date(purchase_date) ASC",
@@ -477,8 +469,8 @@ def get_breakdown_buy_quantity(symbol, isin=""):
     lots = []
     for row in imports:
         lots.append({
-            "date": str(row["date"] or "").split("T")[0],
-            "type": str(row["type"] or "BUY").upper(),
+            "date": str(row["trade_date"] if "trade_date" in row.keys() else row["date"] or "").split("T")[0],
+            "type": str(row["trade_type"] if "trade_type" in row.keys() else row["type"] or "BUY").upper(),
             "quantity": float(row["quantity"] or 0),
             "price": float(row["price"] or 0),
         })
@@ -541,17 +533,14 @@ def get_discrepancy_status_for_symbol(symbol, holdings=None, mf_holdings=None):
     matched_isin = extract_isin(matched)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    import_rows = conn.execute(
-        "SELECT COUNT(*) AS row_count FROM trade_imports WHERE (? != '' AND isin = ?) OR symbol = ?",
-        (matched_isin, matched_isin, symbol),
-    ).fetchone()
+    total_import_rows = len(find_trade_import_rows(conn, symbol=symbol, isin=matched_isin))
     adjustment_rows = conn.execute(
         "SELECT COUNT(*) AS row_count FROM trade_adjustments WHERE symbol = ? OR (? != '' AND symbol IN (SELECT symbol FROM trade_imports WHERE isin = ?))",
         (symbol, matched_isin, matched_isin),
     ).fetchone()
     conn.close()
 
-    total_trade_rows = int((import_rows["row_count"] if import_rows else 0) or 0) + int((adjustment_rows["row_count"] if adjustment_rows else 0) or 0)
+    total_trade_rows = total_import_rows + int((adjustment_rows["row_count"] if adjustment_rows else 0) or 0)
     if total_trade_rows == 0:
         if current_qty > 0:
             return {"has_discrepancy": True, "quantity": current_qty, "holding_qty": current_qty, "tradebook_qty": 0.0, "breakdown_qty": 0.0, "asset_class": classify_asset(matched)}
@@ -670,6 +659,7 @@ def refresh_mf_holdings():
         return SESSION.get("mf_holdings") or []
     try:
         mf_holdings = kite_client.get_mf_holdings(SESSION["access_token"])
+        mf_holdings = kite_client.refresh_mf_nav(mf_holdings)
         return mf_holdings if isinstance(mf_holdings, list) else (SESSION.get("mf_holdings") or [])
     except Exception as exc:
         print(f"MF holdings refresh failed: {exc}")
@@ -937,10 +927,17 @@ def api_holdings():
         mf_holdings = []
         try:
             mf_holdings = kite_client.get_mf_holdings(SESSION["access_token"])
+            mf_holdings = kite_client.refresh_mf_nav(mf_holdings)
             SESSION["mf_holdings"] = mf_holdings
         except Exception:
-            mf_holdings = []
-        save_session_to_db(access_token=SESSION["access_token"], user=SESSION.get("user"), holdings=holdings, mf_holdings=mf_holdings)
+            mf_holdings = SESSION.get("mf_holdings") or []
+        save_session_to_db(
+            access_token=SESSION["access_token"],
+            user=SESSION.get("user"),
+            holdings=holdings,
+            tradebook=SESSION.get("tradebook"),
+            mf_holdings=mf_holdings,
+        )
         return jsonify({"holdings": holdings, "mf_holdings": mf_holdings}), 200
     except Exception as exc:
         return jsonify({"error": f"Holdings fetch failed: {exc}"}), 500
@@ -953,7 +950,13 @@ def api_mf_holdings():
     try:
         mf_holdings = refresh_mf_holdings()
         SESSION["mf_holdings"] = mf_holdings
-        save_session_to_db(access_token=SESSION["access_token"], user=SESSION.get("user"), holdings=SESSION.get("holdings"), mf_holdings=mf_holdings)
+        save_session_to_db(
+            access_token=SESSION["access_token"],
+            user=SESSION.get("user"),
+            holdings=SESSION.get("holdings"),
+            tradebook=SESSION.get("tradebook"),
+            mf_holdings=mf_holdings,
+        )
         return jsonify({"mf_holdings": mf_holdings}), 200
     except Exception as exc:
         return jsonify({"error": f"MF holdings fetch failed: {exc}"}), 500
@@ -969,7 +972,13 @@ def api_tradebook():
     try:
         tradebook = kite_client.get_tradebook(SESSION["access_token"], from_date=from_date, to_date=to_date)
         SESSION["tradebook"] = tradebook
-        save_session_to_db(access_token=SESSION["access_token"], user=SESSION.get("user"), holdings=SESSION.get("holdings"), tradebook=tradebook)
+        save_session_to_db(
+            access_token=SESSION["access_token"],
+            user=SESSION.get("user"),
+            holdings=SESSION.get("holdings"),
+            tradebook=tradebook,
+            mf_holdings=SESSION.get("mf_holdings"),
+        )
         summary = fifo_realized_pnl(tradebook, from_date, to_date)
         return jsonify({"from_date": from_date, "to_date": to_date, "tradebook": tradebook, "summary": summary}), 200
     except Exception as exc:
@@ -1088,6 +1097,7 @@ def api_refresh():
             access_token=SESSION.get("access_token"),
             user=SESSION.get("user"),
             holdings=raw_holdings,
+            tradebook=SESSION.get("tradebook"),
             mf_holdings=mf_holdings,
         )
 
@@ -1134,16 +1144,7 @@ def api_symbol_breakdown(symbol):
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     isin_value = extract_isin(matched)
-    if isin_value:
-        imports = conn.execute(
-            "SELECT symbol, isin, trade_date AS date, trade_type AS type, quantity, price FROM trade_imports WHERE isin = ? ORDER BY date(trade_date) ASC",
-            (isin_value,),
-        ).fetchall()
-    else:
-        imports = conn.execute(
-            "SELECT symbol, isin, trade_date AS date, trade_type AS type, quantity, price FROM trade_imports WHERE symbol = ? ORDER BY date(trade_date) ASC",
-            (symbol,),
-        ).fetchall()
+    imports = find_trade_import_rows(conn, symbol=symbol, isin=isin_value)
     if isin_value:
         adjustments = conn.execute(
             "SELECT symbol, purchase_date AS date, reason AS type, quantity, amount AS price, notes FROM trade_adjustments WHERE isin = ? OR symbol = ? ORDER BY date(purchase_date) ASC",
@@ -1159,8 +1160,8 @@ def api_symbol_breakdown(symbol):
     lots = []
     for row in imports:
         lots.append({
-            "date": str(row["date"] or "").split("T")[0],
-            "type": str(row["type"] or "BUY").upper(),
+            "date": str(row["trade_date"] if "trade_date" in row.keys() else row["date"] or "").split("T")[0],
+            "type": str(row["trade_type"] if "trade_type" in row.keys() else row["type"] or "BUY").upper(),
             "quantity": float(row["quantity"] or 0),
             "price": float(row["price"] or 0),
         })

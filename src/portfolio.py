@@ -92,6 +92,8 @@ def classify_asset(item: Dict[str, Any]) -> str:
             str(item.get("segment") or ""),
             str(item.get("symbol") or ""),
             str(item.get("fund_name") or ""),
+            str(item.get("fund") or ""),
+            str(item.get("scheme") or ""),
             str(item.get("name") or ""),
             str(item.get("isin") or ""),
         ]
@@ -380,4 +382,3 @@ def calculate_metrics(holdings: Dict[str, Any], period: str, access_token: str =
         "total_return_percentage": round(total_return, 2),
         "volatility_annualized": 0.0,
     }
-

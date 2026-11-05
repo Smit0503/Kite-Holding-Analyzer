@@ -95,6 +95,56 @@ class KiteClient:
             return json_body
         return []
 
+    def refresh_mf_nav(self, holdings: list) -> list:
+        """Refresh MF NAV values from the published NAV data using ISIN matching."""
+        if not isinstance(holdings, list):
+            return holdings
+
+        refreshed = []
+        for holding in holdings:
+            item = dict(holding) if isinstance(holding, dict) else holding
+            if not isinstance(item, dict):
+                refreshed.append(item)
+                continue
+
+            isin = str(item.get("tradingsymbol") or item.get("isin") or "").strip().upper()
+            fund_name = str(item.get("fund") or item.get("scheme") or item.get("name") or "").strip()
+            try:
+                search = requests.get(
+                    "https://api.mfapi.in/mf/search",
+                    params={"q": fund_name},
+                    timeout=8,
+                )
+                search.raise_for_status()
+                candidates = search.json()
+                if not isinstance(candidates, list):
+                    candidates = []
+
+                for candidate in candidates:
+                    scheme_code = candidate.get("schemeCode") if isinstance(candidate, dict) else None
+                    if not scheme_code:
+                        continue
+                    scheme = requests.get(f"https://api.mfapi.in/mf/{scheme_code}", timeout=8)
+                    scheme.raise_for_status()
+                    scheme_json = scheme.json()
+                    meta = scheme_json.get("meta", {}) if isinstance(scheme_json, dict) else {}
+                    scheme_isins = {
+                        str(meta.get(key) or "").upper()
+                        for key in ("isin_growth", "isin_div_reinvestment")
+                    }
+                    if isin and isin not in scheme_isins:
+                        continue
+                    data = scheme_json.get("data", []) if isinstance(scheme_json, dict) else []
+                    if data:
+                        item["last_price"] = float(data[0]["nav"])
+                        item["last_price_date"] = str(data[0]["date"])
+                    break
+            except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
+                print(f"MF NAV refresh failed for {fund_name}: {exc}")
+
+            refreshed.append(item)
+        return refreshed
+
     def get_orders(self, access_token: str, from_date: str = "", to_date: str = "") -> list:
         """Fetch order history as a fallback for MF and non-stock trades.
 
