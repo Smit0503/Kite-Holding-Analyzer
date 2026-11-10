@@ -14,23 +14,13 @@ body {
   padding: clamp(20px, 3vw, 36px);
 }
 
-.history-intro {
-  display: grid;
-  gap: var(--space-xs);
-  margin-bottom: var(--space-xl);
+.history-page-title {
+  margin: 0 0 var(--space-lg);
+  font-size: clamp(1.45rem, 3vw, 2rem);
 }
 
-.history-intro h1,
 .history-notes h2 {
   text-wrap: balance;
-}
-
-.history-intro p,
-.history-method {
-  max-width: 68ch;
-  margin: 0;
-  color: var(--color-ink-soft);
-  line-height: 1.55;
 }
 
 .history-filters {
@@ -126,7 +116,7 @@ body {
 
 .history-summary {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(240px, 1.5fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: center;
   gap: var(--space-lg);
   padding-block: var(--space-md) var(--space-lg);
@@ -144,6 +134,20 @@ body {
   font-size: clamp(1.35rem, 3vw, 2rem);
   font-variant-numeric: tabular-nums;
   line-height: 1.15;
+}
+
+.history-period-xirr {
+  margin-left: 0.4em;
+  color: var(--color-ink-soft);
+  font-size: 0.62em;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.history-summary-note {
+  color: var(--color-ink-soft);
+  font-size: 0.78rem;
+  line-height: 1.4;
 }
 
 .history-data-status {
@@ -184,17 +188,24 @@ body {
   display: inline-block;
   width: 24px;
   height: 2px;
-  background: var(--color-accent);
 }
 
-.history-axis-note {
-  color: var(--color-ink-soft);
-  font-size: 0.85rem;
+.legend-line-profit {
+  background: var(--color-positive);
+}
+
+.legend-line-loss {
+  background: var(--color-negative);
 }
 
 .history-chart-wrap {
   position: relative;
   min-height: 280px;
+}
+
+.history-chart-help {
+  color: var(--color-ink-soft);
+  font-size: 0.82rem;
 }
 
 .history-chart {
@@ -204,6 +215,8 @@ body {
   overflow: visible;
   font-family: var(--font-body);
   font-variant-numeric: tabular-nums;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .history-chart .chart-grid {
@@ -218,9 +231,17 @@ body {
 
 .history-chart .chart-line-pnl {
   fill: none;
-  stroke: var(--color-accent);
   stroke-width: 2.5;
   vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+.history-chart .chart-line-pnl.is-profit {
+  stroke: var(--color-positive);
+}
+
+.history-chart .chart-line-pnl.is-loss {
+  stroke: var(--color-negative);
 }
 
 .history-chart .chart-line-hit-area {
@@ -231,11 +252,72 @@ body {
   cursor: crosshair;
 }
 
+.history-chart.is-zoomed {
+  cursor: grab;
+  touch-action: none;
+}
+
+.history-chart.is-zoomed.is-panning {
+  cursor: grabbing;
+}
+
+.history-chart-zoom {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: max-content;
+  margin: var(--space-sm) auto 0;
+  padding: 5px;
+  border: 1px solid var(--color-rule);
+  border-radius: 999px;
+  background: var(--color-panel);
+  box-shadow: var(--shadow-card);
+}
+
+.history-chart-zoom[hidden] {
+  display: none;
+}
+
+.history-chart-zoom button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: var(--color-paper-2);
+  color: var(--color-ink);
+  cursor: pointer;
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.history-chart-zoom output {
+  min-width: 42px;
+  color: var(--color-ink-soft);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.history-chart-zoom button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .history-chart .chart-hover-marker {
   fill: var(--color-panel);
   stroke: var(--color-accent);
   stroke-width: 2.5;
   pointer-events: none;
+}
+
+.history-chart .chart-hover-marker.is-profit {
+  stroke: var(--color-positive);
+}
+
+.history-chart .chart-hover-marker.is-loss {
+  stroke: var(--color-negative);
 }
 
 .history-chart-tooltip {
@@ -318,13 +400,92 @@ body {
   line-height: 1.5;
 }
 
-.history-method {
-  margin-top: var(--space-lg);
-  font-size: 0.85rem;
+.history-loading {
+  display: grid;
+  gap: var(--space-xs);
+  min-width: min(260px, 100%);
+  color: var(--color-ink-soft);
+  font-size: 0.88rem;
+}
+
+.history-loading[hidden] {
+  display: none;
+}
+
+.history-loading progress {
+  width: 100%;
+  height: 8px;
+  accent-color: var(--color-accent);
+}
+
+.history-chart-wrap.is-loading .history-chart {
+  opacity: 0.32;
+  transition: opacity 0.18s ease;
+}
+
+.history-chart-wrap.is-loading .chart-line-hit-area {
+  pointer-events: none;
+}
+
+.history-breakdown {
+  margin-top: var(--space-xl);
+}
+
+.history-breakdown[hidden] {
+  display: none;
+}
+
+.history-breakdown-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-md);
+  margin-bottom: var(--space-sm);
+}
+
+.history-breakdown-heading h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.history-breakdown-heading p {
+  margin: 0;
+  color: var(--color-ink-soft);
+  font-size: 0.88rem;
+}
+
+.history-breakdown-table {
+  min-width: 960px;
+}
+
+.history-breakdown-table td {
+  font-variant-numeric: tabular-nums;
+}
+
+.history-breakdown-table td.numeric {
+  text-align: right;
+}
+
+.history-breakdown-table tfoot {
+  background: var(--color-paper-2);
+  font-weight: 700;
+}
+
+.history-breakdown-table tfoot[hidden] {
+  display: none;
+}
+
+.history-breakdown-table .positive {
+  color: var(--color-positive);
+}
+
+.history-breakdown-table .negative {
+  color: var(--color-negative);
 }
 
 .history-period-button:focus-visible,
 .history-filters button:focus-visible,
+.history-chart-zoom button:focus-visible,
 .history-filters input:focus-visible,
 .history-empty a:focus-visible {
   outline: 2px solid var(--color-focus);
@@ -347,9 +508,8 @@ input:disabled {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .history-data-status {
+  .history-loading {
     grid-column: 1 / -1;
-    text-align: left;
   }
 }
 
@@ -378,6 +538,11 @@ input:disabled {
   }
 
   .history-chart-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .history-breakdown-heading {
     align-items: flex-start;
     flex-direction: column;
   }

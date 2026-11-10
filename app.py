@@ -19,6 +19,7 @@ from src.portfolio_history import (
     ASSET_CLASSES as HISTORY_ASSET_CLASSES,
     PERIOD_DAYS as HISTORY_PERIODS,
     build_portfolio_history,
+    build_portfolio_history_breakdown,
 )
 from src.zerodha_trade_importer import (
     add_manual_adjustment,
@@ -63,13 +64,14 @@ def format_signed(value):
 def xnpv(rate, cashflows):
     if not cashflows:
         return 0.0
+    valid_cashflows = [(dt, amount) for dt, amount in cashflows if dt is not None]
+    if not valid_cashflows:
+        return 0.0
     total = 0.0
-    today = datetime.utcnow().date()
-    for dt, amount in cashflows:
-        if dt is None:
-            continue
-        days = (dt.date() - today).days
-        total += amount / ((1 + rate) ** (days / 365.0)) if rate != -1 else amount
+    start_date = min(dt.date() for dt, _ in valid_cashflows)
+    for dt, amount in valid_cashflows:
+        days = (dt.date() - start_date).days
+        total += amount / ((1 + rate) ** (days / 365.0))
     return total
 
 
@@ -123,7 +125,7 @@ def calculate_symbol_xirr(symbol, asset_class, current_price, current_quantity, 
         ).fetchall()
     conn.close()
 
-    lots = []
+    events = []
     for row in rows:
         try:
             trade_date = datetime.fromisoformat(str(row["trade_date"])[:19])
@@ -132,60 +134,79 @@ def calculate_symbol_xirr(symbol, asset_class, current_price, current_quantity, 
                 trade_date = datetime.strptime(str(row["trade_date"]), "%Y-%m-%d")
             except ValueError:
                 continue
-        lots.append({
-            "date": trade_date,
-            "type": str(row["trade_type"] or "").upper(),
-            "quantity": float(row["quantity"] or 0),
-            "price": float(row["price"] or 0),
-        })
+        quantity = numeric(row["quantity"])
+        price = numeric(row["price"])
+        trade_type = str(row["trade_type"] or "").upper()
+        if quantity <= 0 or price <= 0:
+            continue
+        if trade_type in {"BUY", "SELL"}:
+            events.append({
+                "date": trade_date.date().isoformat(),
+                "type": trade_type,
+                "quantity": quantity,
+                "price": price,
+            })
 
+    daily_totals = {}
+    for event in events:
+        totals = daily_totals.setdefault(event["date"], {"BUY": 0.0, "SELL": 0.0})
+        totals[event["type"]] += event["quantity"]
+    intraday_round_trip_dates = {
+        day
+        for day, totals in daily_totals.items()
+        if totals["BUY"] > 0
+        and totals["SELL"] > 0
+        and abs(totals["BUY"] - totals["SELL"]) <= 1e-6
+    }
+    adjustment_events = []
     for row in adjustments:
         try:
             trade_date = datetime.strptime(str(row["purchase_date"])[:10], "%Y-%m-%d")
         except ValueError:
             continue
-        lots.append({
-            "date": trade_date,
-            "type": "BUY",
-            "quantity": float(row["quantity"] or 0),
-            "price": float(row["amount"] or 0),
-        })
+        quantity = numeric(row["quantity"])
+        amount = numeric(row["amount"])
+        if quantity > 0:
+            adjustment_events.append({
+                "date": trade_date.date().isoformat(),
+                "type": "BUY",
+                "quantity": quantity,
+                "price": amount,
+            })
 
-    remaining_lots = []
-    has_adjustments = bool(adjustments)
-    for lot in sorted(lots, key=lambda item: item["date"]):
-        trade_type = lot["type"]
-        quantity = lot["quantity"]
-        if trade_type == "BUY":
-            if quantity > 0 and lot["price"] > 0:
-                remaining_lots.append({
-                    "date": lot["date"],
-                    "quantity": quantity,
-                    "price": lot["price"],
-                })
-        elif trade_type == "SELL" and not has_adjustments:
-            sold = quantity
-            for remaining in remaining_lots:
-                if sold <= 0:
-                    break
-                matched = min(remaining["quantity"], sold)
-                remaining["quantity"] -= matched
-                sold -= matched
-        remaining_lots = [lot for lot in remaining_lots if lot["quantity"] > 0]
-
+    open_lots = fifo_open_lots([
+        event for event in events
+        if event["date"] not in intraday_round_trip_dates
+    ] + adjustment_events)
+    open_lots.sort(key=lambda lot: (lot["date"], lot["price"]))
     remaining_quantity = numeric(current_quantity)
+    if sum(lot["quantity"] for lot in open_lots) > remaining_quantity + 1e-6:
+        to_exclude = sum(lot["quantity"] for lot in open_lots) - remaining_quantity
+        while to_exclude > 1e-9 and open_lots:
+            excluded = min(to_exclude, open_lots[0]["quantity"])
+            open_lots[0]["quantity"] -= excluded
+            to_exclude -= excluded
+            if open_lots[0]["quantity"] <= 1e-9:
+                open_lots.pop(0)
+
     cashflows = []
-    for lot in remaining_lots:
-        if remaining_quantity <= 0:
-            break
-        quantity = min(lot["quantity"], remaining_quantity)
-        cashflows.append((lot["date"], -(quantity * lot["price"])))
-        remaining_quantity -= quantity
+    available_quantity = 0.0
+    for lot in open_lots:
+        quantity = max(numeric(lot.get("quantity")), 0.0)
+        if quantity <= 0:
+            continue
+        available_quantity += quantity
+        price = numeric(lot.get("price"))
+        if price > 0:
+            try:
+                purchase_date = datetime.strptime(str(lot["date"])[:10], "%Y-%m-%d")
+            except (KeyError, ValueError):
+                continue
+            cashflows.append((purchase_date, -(quantity * price)))
 
-    if not cashflows:
+    if available_quantity <= 0:
         return 0.0
-
-    cashflows.append((datetime.utcnow(), current_quantity * current_price))
+    cashflows.append((datetime.utcnow(), available_quantity * current_price))
     return xirr(cashflows)
 
 
@@ -918,7 +939,6 @@ def api_portfolio_history():
             mf_holdings=SESSION.get("mf_holdings"),
             selected_assets=selected_assets,
             period=period,
-            indian_api_key=os.getenv("INDIAN_API_KEY", ""),
             db_path=DB_PATH,
         )
         return jsonify(result), 200
@@ -926,6 +946,30 @@ def api_portfolio_history():
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:
         return jsonify({"error": f"Portfolio history calculation failed: {exc}"}), 500
+
+
+@app.route('/api/portfolio-history/details', methods=['GET'])
+def api_portfolio_history_details():
+    if not SESSION.get("access_token"):
+        return jsonify({"error": "Not authenticated. Visit /login first."}), 401
+    if not kite_client:
+        return jsonify({"error": "Kite client is not configured."}), 500
+
+    selected_date = request.args.get("date", "")
+    selected_assets = parse_asset_filters(request.args.getlist("filter"))
+    try:
+        result = build_portfolio_history_breakdown(
+            holdings=SESSION.get("holdings"),
+            mf_holdings=SESSION.get("mf_holdings"),
+            selected_assets=selected_assets,
+            selected_date=selected_date,
+            db_path=DB_PATH,
+        )
+        return jsonify(result), 200
+    except (ValueError, RuntimeError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": f"Portfolio history detail calculation failed: {exc}"}), 500
 
 
 @app.route('/tradebook', methods=['GET'])

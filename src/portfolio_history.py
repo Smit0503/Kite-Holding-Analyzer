@@ -1,5 +1,6 @@
 import calendar
 from bisect import bisect_right
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
@@ -22,16 +23,15 @@ PERIOD_DAYS = {
 PERIOD_MONTHS = {"1M": 1, "3M": 3, "6M": 6, "1Y": 12, "3Y": 36, "5Y": 60}
 ASSET_CLASSES = {"equity", "mf", "debt", "metal"}
 DB_PATH = Path(__file__).resolve().parents[1] / "session.db"
-INDIAN_API_BASE_URL = "https://stock.indianapi.in"
 MFAPI_BASE_URL = "https://api.mfapi.in"
-INDIAN_API_PERIODS = {
-    "5Y": "5yr",
-}
+MAX_PRICE_FETCH_WORKERS = 4
+NSE_SYMBOL_ALIASES = {"WBAG": "WABAG"}
 
 
 def _connect(db_path: Optional[str | Path] = None) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path or DB_PATH))
+    conn = sqlite3.connect(str(db_path or DB_PATH), timeout=20)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 20000")
     return conn
 
 
@@ -246,10 +246,18 @@ def _open_lots_for_position(
             _clean(row["series"]).upper()
             for row in reversed(trade_rows)
             if "series" in row.keys() and _clean(row["series"])
+            and (
+                "exchange" not in row.keys()
+                or not _clean(row["exchange"])
+                or _clean(row["exchange"]).upper() == "NSE"
+            )
         ),
         "",
     )
-    position["nse_series"] = trade_series or ("GB" if position["symbol"].startswith("SGB") else "EQ")
+    if position["asset_class"] == "equity":
+        position["nse_series"] = "EQ"
+    else:
+        position["nse_series"] = trade_series or ("GB" if position["symbol"].startswith("SGB") else "EQ")
 
     events: List[Dict[str, Any]] = []
     for row in trade_rows:
@@ -400,6 +408,21 @@ def _store_prices(
     end: date,
 ) -> None:
     cached_at = datetime.now().astimezone().isoformat()
+    existing = conn.execute(
+        "SELECT coverage_start, coverage_end FROM price_history_sync WHERE instrument_key = ? AND provider = ?",
+        (position["instrument_key"], provider),
+    ).fetchone()
+    if existing:
+        existing_start = _date_value(existing["coverage_start"])
+        existing_end = _date_value(existing["coverage_end"])
+        if (
+            existing_start
+            and existing_end
+            and start <= existing_end + timedelta(days=1)
+            and end + timedelta(days=1) >= existing_start
+        ):
+            start = min(start, existing_start)
+            end = max(end, existing_end)
     conn.executemany(
         """
         INSERT INTO historical_prices (instrument_key, asset_class, price_date, close, provider, cached_at)
@@ -414,9 +437,20 @@ def _store_prices(
         INSERT INTO price_history_sync (instrument_key, provider, coverage_start, coverage_end, synced_at)
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(instrument_key, provider)
-        DO UPDATE SET coverage_start = excluded.coverage_start,
-                      coverage_end = excluded.coverage_end,
-                      synced_at = excluded.synced_at
+        DO UPDATE SET
+            coverage_start = CASE
+                WHEN excluded.coverage_start <= date(price_history_sync.coverage_end, '+1 day')
+                     AND excluded.coverage_end >= date(price_history_sync.coverage_start, '-1 day')
+                THEN min(price_history_sync.coverage_start, excluded.coverage_start)
+                ELSE price_history_sync.coverage_start
+            END,
+            coverage_end = CASE
+                WHEN excluded.coverage_start <= date(price_history_sync.coverage_end, '+1 day')
+                     AND excluded.coverage_end >= date(price_history_sync.coverage_start, '-1 day')
+                THEN max(price_history_sync.coverage_end, excluded.coverage_end)
+                ELSE price_history_sync.coverage_end
+            END,
+            synced_at = excluded.synced_at
         """,
         (position["instrument_key"], provider, start.isoformat(), end.isoformat(), cached_at),
     )
@@ -437,69 +471,24 @@ def _cached_prices(conn: sqlite3.Connection, position: Dict[str, Any], provider:
     }
 
 
-def _indian_api_prices(position: Dict[str, Any], period: str, api_key: str) -> List[Tuple[str, float]]:
-    identifier = _clean(position.get("symbol") or position.get("isin")).upper()
-    if not identifier:
-        raise RuntimeError("No trading symbol or ISIN is available for this holding.")
-    if not api_key:
-        raise RuntimeError("INDIAN_API_KEY is not configured.")
-
-    response = requests.get(
-        f"{INDIAN_API_BASE_URL}/historical_data",
-        headers={"X-Api-Key": api_key},
-        params={"stock_name": identifier, "period": INDIAN_API_PERIODS[period], "filter": "price"},
-        timeout=20,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    datasets = payload.get("datasets", []) if isinstance(payload, dict) else []
-    if not isinstance(datasets, list):
-        raise RuntimeError(f"IndianAPI returned an invalid price response for {identifier}.")
-    price_dataset = next(
-        (
-            dataset
-            for dataset in datasets
-            if isinstance(dataset, dict) and _clean(dataset.get("metric")).lower() == "price"
-        ),
-        None,
-    )
-    if not price_dataset:
-        raise RuntimeError(f"IndianAPI returned no price series for {identifier}.")
-    values = price_dataset.get("values", [])
-    if not isinstance(values, list):
-        raise RuntimeError(f"IndianAPI returned an invalid price series for {identifier}.")
-
-    prices = []
-    for point in values:
-        if not isinstance(point, list) or len(point) < 2:
-            continue
-        day = _date_value(point[0])
-        try:
-            close = float(point[1])
-        except (TypeError, ValueError):
-            continue
-        if day and close > 0:
-            prices.append((day.isoformat(), close))
-    if not prices:
-        raise RuntimeError(f"IndianAPI returned no daily prices for {identifier}.")
-    return prices
-
-
 def _jugaad_nse_prices(position: Dict[str, Any], start: date, end: date) -> List[Tuple[str, float]]:
     symbol = _clean(position.get("symbol")).upper()
     if not symbol:
         raise RuntimeError("No NSE trading symbol is available for this holding.")
-    if _clean(position.get("exchange") or "NSE").upper() != "NSE":
-        raise RuntimeError("NSE historical data is only available for NSE holdings.")
+    nse_symbol = NSE_SYMBOL_ALIASES.get(symbol, symbol)
 
     try:
-        from jugaad_data.nse import stock_raw
+        from jugaad_data.nse import NSEHistory
 
-        records = stock_raw(
-            symbol,
+        records = NSEHistory().stock_raw(
+            nse_symbol,
             start,
             end,
-            series=_clean(position.get("nse_series")) or "EQ",
+            series=(
+                "EQ"
+                if position.get("asset_class") == "equity"
+                else _clean(position.get("nse_series")) or "EQ"
+            ),
         )
     except (ImportError, KeyError, requests.RequestException, TypeError, ValueError) as exc:
         raise RuntimeError(f"NSE history lookup failed for {symbol}: {exc}") from exc
@@ -510,6 +499,11 @@ def _jugaad_nse_prices(position: Dict[str, Any], start: date, end: date) -> List
     prices = []
     for record in records:
         if not isinstance(record, dict):
+            continue
+        if (
+            position.get("asset_class") == "equity"
+            and _clean(record.get("CH_SERIES")).upper() != "EQ"
+        ):
             continue
         day = _date_value(record.get("mTIMESTAMP"))
         if not day:
@@ -527,7 +521,7 @@ def _jugaad_nse_prices(position: Dict[str, Any], start: date, end: date) -> List
         if start <= day <= end and close > 0:
             prices.append((day.isoformat(), close))
     if not prices:
-        raise RuntimeError(f"NSE returned no historical prices for {symbol}.")
+        raise RuntimeError(f"NSE returned no historical prices for {symbol} (queried {nse_symbol}).")
     return prices
 
 
@@ -591,61 +585,90 @@ def _mf_scheme_data(position: Dict[str, Any]) -> List[Tuple[str, float]]:
 
 
 def _price_provider(position: Dict[str, Any]) -> str:
-    return "mfapi" if position["asset_class"] == "mf" else "indianapi"
+    if position["asset_class"] == "mf":
+        return "mfapi"
+    if position["asset_class"] == "equity":
+        return "jugaad-nse-eq-only"
+    return "jugaad-nse"
 
 
 def _get_or_fetch_prices(
     conn: sqlite3.Connection,
     position: Dict[str, Any],
-    period: str,
     start: date,
     end: date,
-    indian_api_key: str,
 ) -> Tuple[Dict[date, float], str]:
-    primary_provider = _price_provider(position)
-    history_start = _period_start("5Y", end)
-    providers = [(primary_provider, history_start)]
-    if primary_provider != "mfapi":
-        nse_provider = ("jugaad-nse", start)
-        if position["asset_class"] in {"debt", "metal"} or _cached_prices(
-            conn, position, "jugaad-nse"
-        ):
-            providers.insert(0, nse_provider)
-        else:
-            providers.append(nse_provider)
+    provider = _price_provider(position)
+    cached = _cached_prices(conn, position, provider)
+    sync_row = conn.execute(
+        "SELECT coverage_start, coverage_end, synced_at FROM price_history_sync WHERE instrument_key = ? AND provider = ?",
+        (position["instrument_key"], provider),
+    ).fetchone()
+    coverage_end = _date_value(sync_row["coverage_end"]) if sync_row else None
+    synced_date = _date_value(sync_row["synced_at"]) if sync_row else None
+    coverage_updated_today = synced_date == end and coverage_end is not None and coverage_end >= end
+    earliest_cached_date = min(cached) if cached else None
+    latest_cached_date = max(cached) if cached else None
+
+    if _sync_is_fresh(conn, position["instrument_key"], provider, end, start):
+        if cached:
+            return cached, provider
+
+    if provider == "mfapi":
+        fetch_ranges = [(_period_start("5Y", end), end)]
+    else:
+        history_start = _period_start("5Y", end)
+        fetch_ranges = []
+        if not cached or earliest_cached_date is None or earliest_cached_date > history_start:
+            fetch_ranges.append((history_start, end))
+        elif not coverage_updated_today:
+            refresh_start = (
+                max(history_start, latest_cached_date - timedelta(days=7))
+                if latest_cached_date
+                else history_start
+            )
+            fetch_ranges.append((refresh_start, end))
+
+    if not fetch_ranges:
+        return cached, provider
 
     errors = []
-    for provider, fetch_start in providers:
-        if _sync_is_fresh(conn, position["instrument_key"], provider, end, fetch_start):
-            cached = _cached_prices(conn, position, provider)
-            if cached:
-                return cached, provider
-            errors.append(f"{provider} returned no prices on its latest lookup")
-            continue
-
+    for fetch_start, fetch_end in fetch_ranges:
         try:
-            if provider == "mfapi":
-                raw_prices = _mf_scheme_data(position)
-            elif provider == "indianapi":
-                raw_prices = _indian_api_prices(position, "5Y", indian_api_key)
-            else:
-                raw_prices = _jugaad_nse_prices(position, fetch_start, end)
+            raw_prices = (
+                _mf_scheme_data(position)
+                if provider == "mfapi"
+                else _jugaad_nse_prices(position, fetch_start, fetch_end)
+            )
             prices = [
                 (day, close)
                 for day, close in raw_prices
-                if (parsed_day := _date_value(day)) is not None and fetch_start <= parsed_day <= end
+                if (parsed_day := _date_value(day)) is not None and fetch_start <= parsed_day <= fetch_end
             ]
             if not prices:
-                raise RuntimeError(f"No prices were returned within the requested history.")
-            _store_prices(conn, position, provider, prices, fetch_start, end)
+                raise RuntimeError(f"No prices were returned within {fetch_start} to {fetch_end}.")
+            _store_prices(conn, position, provider, prices, fetch_start, fetch_end)
             conn.commit()
-            return _cached_prices(conn, position, provider), provider
         except (ImportError, requests.RequestException, ValueError, RuntimeError) as exc:
-            _store_prices(conn, position, provider, [], fetch_start, end)
-            conn.commit()
-            errors.append(f"{provider}: {exc}")
+            errors.append(str(exc))
+        cached = _cached_prices(conn, position, provider)
 
-    raise RuntimeError("; ".join(errors) or f"No prices available for {position['symbol']}.")
+    if not cached:
+        raise RuntimeError("; ".join(errors) or f"No prices available for {position['symbol']}.")
+    return cached, provider
+
+
+def _fetch_position_prices(
+    position: Dict[str, Any],
+    start: date,
+    end: date,
+    db_path: Optional[str | Path],
+) -> Tuple[Dict[date, float], str]:
+    conn = _connect(db_path)
+    try:
+        return _get_or_fetch_prices(conn, position, start, end)
+    finally:
+        conn.close()
 
 
 def _points_for_lots(
@@ -673,6 +696,7 @@ def _points_for_lots(
     for day in calendar_days:
         pnl = 0.0
         cost_basis = 0.0
+        market_value = 0.0
         has_eligible_lot = False
         for position in positions:
             key = position["instrument_key"]
@@ -693,14 +717,216 @@ def _points_for_lots(
                     continue
                 has_eligible_lot = True
                 cost_basis += lot["quantity"] * lot["price"]
+                market_value += lot["quantity"] * market_price
                 pnl += lot["quantity"] * (market_price - lot["price"])
         if has_eligible_lot:
             output.append({
                 "date": day.isoformat(),
                 "pnl": round(pnl, 2),
                 "pnl_pct": round((pnl / cost_basis) * 100, 4) if cost_basis else 0.0,
+                "invested": round(cost_basis, 2),
+                "current_value": round(market_value, 2),
             })
     return output
+
+
+def _modified_dietz_return(
+    points: List[Dict[str, Any]],
+    lots_by_key: Dict[str, List[Dict[str, Any]]],
+    positions: List[Dict[str, Any]],
+) -> Optional[float]:
+    if len(points) < 2:
+        return None
+    try:
+        start_day = date.fromisoformat(points[0]["date"])
+        end_day = date.fromisoformat(points[-1]["date"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    period_days = (end_day - start_day).days
+    if period_days <= 0:
+        return None
+
+    net_contributions = 0.0
+    weighted_contributions = 0.0
+    for position in positions:
+        for lot in lots_by_key.get(position["instrument_key"], []):
+            try:
+                purchase_day = date.fromisoformat(lot["date"])
+                contribution = float(lot["quantity"]) * float(lot["price"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if start_day < purchase_day <= end_day and contribution > 0:
+                net_contributions += contribution
+                weighted_contributions += contribution * ((end_day - purchase_day).days / period_days)
+
+    opening_value = float(points[0].get("current_value") or 0)
+    ending_value = float(points[-1].get("current_value") or 0)
+    denominator = opening_value + weighted_contributions
+    if denominator <= 0:
+        return None
+    return round(
+        ((ending_value - opening_value - net_contributions) / denominator) * 100,
+        4,
+    )
+
+
+def _xirr(cashflows: List[Tuple[date, float]]) -> Optional[float]:
+    if len(cashflows) < 2:
+        return None
+    has_positive = any(amount > 0 for _, amount in cashflows)
+    has_negative = any(amount < 0 for _, amount in cashflows)
+    if not has_positive or not has_negative:
+        return None
+
+    start_day = min(day for day, _ in cashflows)
+
+    def xnpv(rate: float) -> float:
+        return sum(
+            amount / ((1 + rate) ** ((day - start_day).days / 365.0))
+            for day, amount in cashflows
+        )
+
+    low = -0.9999
+    high = 1.0
+    while xnpv(high) > 0 and high < 10000.0:
+        high = high * 2 + 1
+    if xnpv(low) < 0 or xnpv(high) > 0:
+        return None
+
+    for _ in range(200):
+        middle = (low + high) / 2
+        if xnpv(middle) > 0:
+            low = middle
+        else:
+            high = middle
+    return round(((low + high) / 2) * 100, 4)
+
+
+def _period_xirr(
+    points: List[Dict[str, Any]],
+    lots_by_key: Dict[str, List[Dict[str, Any]]],
+    positions: List[Dict[str, Any]],
+) -> Optional[float]:
+    if len(points) < 2:
+        return None
+    try:
+        start_day = date.fromisoformat(points[0]["date"])
+        end_day = date.fromisoformat(points[-1]["date"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if end_day <= start_day:
+        return None
+
+    opening_value = float(points[0].get("current_value") or 0)
+    ending_value = float(points[-1].get("current_value") or 0)
+    cashflows = []
+    if opening_value > 0:
+        cashflows.append((start_day, -opening_value))
+    for position in positions:
+        for lot in lots_by_key.get(position["instrument_key"], []):
+            try:
+                purchase_day = date.fromisoformat(lot["date"])
+                contribution = float(lot["quantity"]) * float(lot["price"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if start_day < purchase_day <= end_day and contribution > 0:
+                cashflows.append((purchase_day, -contribution))
+    if ending_value > 0:
+        cashflows.append((end_day, ending_value))
+    return _xirr(cashflows)
+
+
+def build_portfolio_history_breakdown(
+    holdings: Any,
+    mf_holdings: Any,
+    selected_assets: Iterable[str],
+    selected_date: str,
+    db_path: Optional[str | Path] = None,
+) -> Dict[str, Any]:
+    day = _date_value(selected_date)
+    if not day:
+        raise ValueError(f"Invalid history date: {selected_date}.")
+    today = date.today()
+    if day > today:
+        raise ValueError(f"History date cannot be after today: {selected_date}.")
+
+    selected = {value.lower() for value in selected_assets if value}
+    if not selected or "all" in selected:
+        selected = set(ASSET_CLASSES)
+    invalid = selected - ASSET_CLASSES
+    if invalid:
+        raise ValueError(f"Unsupported asset filters: {', '.join(sorted(invalid))}")
+
+    positions = _position_map(holdings, mf_holdings, selected)
+    if not positions:
+        return {"date": day.isoformat(), "rows": [], "warnings": []}
+
+    ensure_history_tables(db_path)
+    conn = _connect(db_path)
+    rows = []
+    warnings = []
+    try:
+        for position in positions:
+            lots, warning = _open_lots_for_position(conn, position)
+            if warning:
+                warnings.append(warning)
+            if not lots:
+                continue
+
+            prices = _cached_prices(conn, position, _price_provider(position))
+            if not prices:
+                continue
+            latest_price_date = max(prices)
+            if today - latest_price_date > timedelta(days=7):
+                continue
+
+            if day == today:
+                quantity = float(position["quantity"])
+                invested = quantity * float(position.get("average_price", 0))
+                price = float(position.get("current_price", 0))
+                price_date = day
+            else:
+                price_dates = sorted(prices)
+                price_index = bisect_right(price_dates, day) - 1
+                if price_index < 0:
+                    continue
+                price_date = price_dates[price_index]
+                if day - price_date > timedelta(days=7):
+                    continue
+                price = prices[price_date]
+                active_lots = [
+                    lot for lot in lots
+                    if date.fromisoformat(lot["date"]) <= day
+                ]
+                quantity = sum(float(lot["quantity"]) for lot in active_lots)
+                invested = sum(
+                    float(lot["quantity"]) * float(lot["price"])
+                    for lot in active_lots
+                )
+                if quantity <= 0:
+                    continue
+
+            current_value = quantity * price
+            rows.append({
+                "symbol": (
+                    position["name"]
+                    if position["asset_class"] == "mf"
+                    else position["symbol"] or position["name"]
+                ),
+                "name": position["name"],
+                "asset_class": position["asset_class"],
+                "quantity": round(quantity, 6),
+                "price": round(price, 4),
+                "price_date": price_date.isoformat(),
+                "invested": round(invested, 2),
+                "current_value": round(current_value, 2),
+                "pnl": round(current_value - invested, 2),
+            })
+    finally:
+        conn.close()
+
+    rows.sort(key=lambda row: row["symbol"].upper())
+    return {"date": day.isoformat(), "rows": rows, "warnings": warnings}
 
 
 def build_portfolio_history(
@@ -708,7 +934,6 @@ def build_portfolio_history(
     mf_holdings: Any,
     selected_assets: Iterable[str],
     period: str = "1M",
-    indian_api_key: str = "",
     db_path: Optional[str | Path] = None,
 ) -> Dict[str, Any]:
     normalized_period = period.upper()
@@ -729,6 +954,8 @@ def build_portfolio_history(
             "period": normalized_period,
             "selected_assets": sorted(selected),
             "points": [],
+            "period_return_pct": None,
+            "period_xirr_pct": None,
             "warnings": [],
             "sources": [],
             "available_holdings": [],
@@ -748,59 +975,70 @@ def build_portfolio_history(
                 f"{position['symbol']}: no current open purchase lots were found in the imported trade ledger; excluded from historical reconstruction."
             )
     chart_positions = [position for position in positions if lots_by_key.get(position["instrument_key"])]
+    conn.close()
 
     prices_by_key: Dict[str, Dict[date, float]] = {}
     sources = set()
-    for position in chart_positions:
-        provider = _price_provider(position)
-        try:
-            prices, provider = _get_or_fetch_prices(
-                conn, position, normalized_period, start, today, indian_api_key,
-            )
-            if not prices:
-                raise RuntimeError("No historical prices are cached for this holding.")
-            latest_price_date = max(prices)
-            if today - latest_price_date > timedelta(days=7):
-                warnings.append(
-                    f"{position['symbol'] or position['isin']}: latest cached price is from {latest_price_date.isoformat()}; stale history was excluded."
-                )
-                continue
-            prices_by_key[position["instrument_key"]] = prices
-            source_labels = {
-                "mfapi": "MFAPI NAV",
-                "indianapi": "IndianAPI historical prices",
-                "jugaad-nse": "NSE historical prices (jugaad-data)",
+    if chart_positions:
+        with ThreadPoolExecutor(max_workers=min(MAX_PRICE_FETCH_WORKERS, len(chart_positions))) as executor:
+            futures = {
+                executor.submit(_fetch_position_prices, position, start, today, db_path): position
+                for position in chart_positions
             }
-            sources.add(source_labels[provider])
-        except (requests.RequestException, ValueError, RuntimeError) as exc:
-            warnings.append(f"{position['symbol'] or position['isin']}: historical price unavailable ({exc})")
-    conn.close()
+            for future in as_completed(futures):
+                position = futures[future]
+                provider = _price_provider(position)
+                try:
+                    prices, provider = future.result()
+                    if not prices:
+                        raise RuntimeError("No historical prices are cached for this holding.")
+                    latest_price_date = max(prices)
+                    if today - latest_price_date > timedelta(days=7):
+                        warnings.append(
+                            f"{position['symbol'] or position['isin']}: latest cached price is from {latest_price_date.isoformat()}; stale history was excluded."
+                        )
+                        continue
+                    prices_by_key[position["instrument_key"]] = prices
+                    source_labels = {
+                        "mfapi": "MFAPI NAV",
+                        "jugaad-nse": "NSE historical prices (jugaad-data)",
+                        "jugaad-nse-eq-only": "NSE historical prices (jugaad-data)",
+                    }
+                    sources.add(source_labels[provider])
+                except (ImportError, requests.RequestException, ValueError, RuntimeError) as exc:
+                    warnings.append(f"{position['symbol'] or position['isin']}: historical price unavailable ({exc})")
 
     priced_positions = [position for position in chart_positions if position["instrument_key"] in prices_by_key]
     points = _points_for_lots(lots_by_key, priced_positions, prices_by_key, start, today)
-    if positions:
+    if priced_positions:
         current_cost = sum(
             position["quantity"] * position.get("average_price", 0)
-            for position in positions
+            for position in priced_positions
         )
         current_pnl = sum(
             position["quantity"] * (position.get("current_price", 0) - position.get("average_price", 0))
-            for position in positions
+            for position in priced_positions
         )
         latest_point = {
             "date": today.isoformat(),
             "pnl": round(current_pnl, 2),
             "pnl_pct": round((current_pnl / current_cost) * 100, 4) if current_cost else 0.0,
+            "invested": round(current_cost, 2),
+            "current_value": round(current_cost + current_pnl, 2),
         }
         if points and points[-1]["date"] == latest_point["date"]:
             points[-1] = latest_point
         else:
             points.append(latest_point)
 
+    period_return_pct = _modified_dietz_return(points, lots_by_key, priced_positions)
+    period_xirr_pct = _period_xirr(points, lots_by_key, priced_positions)
     return {
         "period": normalized_period,
         "selected_assets": sorted(selected),
         "points": points,
+        "period_return_pct": period_return_pct,
+        "period_xirr_pct": period_xirr_pct,
         "warnings": warnings,
         "sources": sorted(sources),
         "available_holdings": [
