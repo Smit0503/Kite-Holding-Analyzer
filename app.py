@@ -3,7 +3,6 @@ import os
 import re
 import sqlite3
 from datetime import datetime, timedelta
-
 from flask import Flask, jsonify, redirect, render_template, request
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -12,8 +11,14 @@ from src.kite_client import KiteClient
 from src.portfolio import (
     calculate_metrics,
     classify_asset,
+    fifo_open_lots,
     fifo_purchase_date_for_holding,
     fifo_realized_pnl,
+)
+from src.portfolio_history import (
+    ASSET_CLASSES as HISTORY_ASSET_CLASSES,
+    PERIOD_DAYS as HISTORY_PERIODS,
+    build_portfolio_history,
 )
 from src.zerodha_trade_importer import (
     add_manual_adjustment,
@@ -483,37 +488,7 @@ def get_breakdown_buy_quantity(symbol, isin=""):
             "notes": str(row["notes"] or "").strip(),
         })
 
-    available_lots = []
-    for day in sorted({lot["date"] for lot in lots}):
-        queue = []
-        for lot in sorted([item for item in lots if item["date"] == day], key=lambda item: (item["type"] == "SELL", item["price"])):
-            if str(lot.get("type") or "BUY").upper() == "BUY":
-                queue.append({
-                    "date": day,
-                    "trade_type": "BUY",
-                    "type": "BUY",
-                    "quantity": float(lot["quantity"] or 0),
-                    "price": float(lot["price"] or 0),
-                    "notes": str(lot.get("notes") or "").strip(),
-                })
-            else:
-                sold = float(lot["quantity"] or 0)
-                while sold > 0 and queue:
-                    first = queue[0]
-                    matched = min(float(first["quantity"] or 0), sold)
-                    first["quantity"] -= matched
-                    sold -= matched
-                    if first["quantity"] <= 0:
-                        queue.pop(0)
-        for row in queue:
-            if float(row["quantity"] or 0) > 0:
-                available_lots.append({
-                    "date": day,
-                    "type": "BUY",
-                    "quantity": float(row["quantity"] or 0),
-                    "price": float(row["price"] or 0),
-                    "notes": str(row.get("notes") or "").strip(),
-                })
+    available_lots = fifo_open_lots(lots)
 
     return sum(float(lot["quantity"] or 0) for lot in available_lots)
 
@@ -657,13 +632,24 @@ def save_session_to_db(access_token=None, user=None, holdings=None, tradebook=No
 def refresh_mf_holdings():
     if not SESSION.get("access_token") or not kite_client:
         return SESSION.get("mf_holdings") or []
-    try:
-        mf_holdings = kite_client.get_mf_holdings(SESSION["access_token"])
-        mf_holdings = kite_client.refresh_mf_nav(mf_holdings)
-        return mf_holdings if isinstance(mf_holdings, list) else (SESSION.get("mf_holdings") or [])
-    except Exception as exc:
-        print(f"MF holdings refresh failed: {exc}")
-        return SESSION.get("mf_holdings") or []
+    mf_holdings = kite_client.get_mf_holdings(SESSION["access_token"])
+    if not isinstance(mf_holdings, list):
+        raise ValueError("Kite returned an invalid MF holdings response.")
+    refreshed = kite_client.refresh_mf_nav(mf_holdings)
+    if not isinstance(refreshed, list):
+        raise ValueError("MF NAV refresh returned an invalid response.")
+    return refreshed
+
+
+def mf_nav_refresh_errors(mf_holdings):
+    return [
+        {
+            "fund": item.get("fund") or item.get("scheme") or item.get("name") or "Unknown fund",
+            "error": item["nav_refresh_error"],
+        }
+        for item in mf_holdings or []
+        if isinstance(item, dict) and item.get("nav_refresh_error")
+    ]
 
 
 def get_default_date_window(days=90):
@@ -876,6 +862,72 @@ def holdings_page():
     )
 
 
+@app.route('/portfolio-history', methods=['GET'])
+def portfolio_history_page():
+    if not SESSION.get("access_token"):
+        return redirect('/login')
+    if not kite_client:
+        return jsonify({"error": "Kite client is not configured."}), 500
+
+    try:
+        holdings = SESSION.get("holdings")
+        if not holdings:
+            holdings = kite_client.get_holdings(SESSION["access_token"])
+            SESSION["holdings"] = holdings
+        mf_holdings = SESSION.get("mf_holdings")
+        if mf_holdings is None:
+            mf_holdings = kite_client.get_mf_holdings(SESSION["access_token"])
+            SESSION["mf_holdings"] = mf_holdings
+        save_session_to_db(
+            access_token=SESSION["access_token"],
+            user=SESSION.get("user"),
+            holdings=holdings,
+            tradebook=SESSION.get("tradebook"),
+            mf_holdings=mf_holdings,
+        )
+    except Exception as exc:
+        return jsonify({"error": f"Portfolio history holdings fetch failed: {exc}"}), 500
+
+    selected_assets = parse_asset_filters(request.args.getlist("filter"))
+    period = request.args.get("period", "1M").upper()
+    if period not in HISTORY_PERIODS:
+        period = "1M"
+    return render_template(
+        "portfolio_history.html",
+        selected_assets=selected_assets,
+        period=period,
+        asset_classes=sorted(HISTORY_ASSET_CLASSES),
+        user_name=(SESSION.get("user") or {}).get("user_name") or (SESSION.get("user") or {}).get("name") or "User",
+    )
+
+
+@app.route('/api/portfolio-history', methods=['GET'])
+def api_portfolio_history():
+    if not SESSION.get("access_token"):
+        return jsonify({"error": "Not authenticated. Visit /login first."}), 401
+    if not kite_client:
+        return jsonify({"error": "Kite client is not configured."}), 500
+
+    selected_assets = parse_asset_filters(request.args.getlist("filter"))
+    period = request.args.get("period", "1M").upper()
+    if period not in HISTORY_PERIODS:
+        return jsonify({"error": f"Unsupported period: {period}."}), 400
+    try:
+        result = build_portfolio_history(
+            holdings=SESSION.get("holdings"),
+            mf_holdings=SESSION.get("mf_holdings"),
+            selected_assets=selected_assets,
+            period=period,
+            indian_api_key=os.getenv("INDIAN_API_KEY", ""),
+            db_path=DB_PATH,
+        )
+        return jsonify(result), 200
+    except (ValueError, RuntimeError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": f"Portfolio history calculation failed: {exc}"}), 500
+
+
 @app.route('/tradebook', methods=['GET'])
 def tradebook_page():
     if not SESSION.get("access_token"):
@@ -924,13 +976,8 @@ def api_holdings():
     try:
         holdings = kite_client.get_holdings(SESSION["access_token"])
         SESSION["holdings"] = holdings
-        mf_holdings = []
-        try:
-            mf_holdings = kite_client.get_mf_holdings(SESSION["access_token"])
-            mf_holdings = kite_client.refresh_mf_nav(mf_holdings)
-            SESSION["mf_holdings"] = mf_holdings
-        except Exception:
-            mf_holdings = SESSION.get("mf_holdings") or []
+        mf_holdings = refresh_mf_holdings()
+        SESSION["mf_holdings"] = mf_holdings
         save_session_to_db(
             access_token=SESSION["access_token"],
             user=SESSION.get("user"),
@@ -938,7 +985,11 @@ def api_holdings():
             tradebook=SESSION.get("tradebook"),
             mf_holdings=mf_holdings,
         )
-        return jsonify({"holdings": holdings, "mf_holdings": mf_holdings}), 200
+        return jsonify({
+            "holdings": holdings,
+            "mf_holdings": mf_holdings,
+            "mf_nav_errors": mf_nav_refresh_errors(mf_holdings),
+        }), 200
     except Exception as exc:
         return jsonify({"error": f"Holdings fetch failed: {exc}"}), 500
 
@@ -957,7 +1008,10 @@ def api_mf_holdings():
             tradebook=SESSION.get("tradebook"),
             mf_holdings=mf_holdings,
         )
-        return jsonify({"mf_holdings": mf_holdings}), 200
+        return jsonify({
+            "mf_holdings": mf_holdings,
+            "mf_nav_errors": mf_nav_refresh_errors(mf_holdings),
+        }), 200
     except Exception as exc:
         return jsonify({"error": f"MF holdings fetch failed: {exc}"}), 500
 
@@ -1117,6 +1171,7 @@ def api_refresh():
             "portfolio_xirr": calculate_weighted_xirr(filtered_rows),
             "user_name": (SESSION.get("user") or {}).get("user_name") or (SESSION.get("user") or {}).get("name") or "User",
             "asset_filter": ",".join(sorted(selected_assets)) if "all" not in selected_assets else "all",
+            "mf_nav_errors": mf_nav_refresh_errors(mf_holdings),
         })
     
     except Exception as e:
@@ -1188,37 +1243,7 @@ def api_symbol_breakdown(symbol):
                 "price": avg or ltp or 0,
             })
 
-    available_lots = []
-    for day in sorted({lot["date"] for lot in lots}):
-        queue = []
-        for lot in sorted([item for item in lots if item["date"] == day], key=lambda item: (item["type"] == "SELL", item["price"])):
-            if str(lot.get("type") or "BUY").upper() == "BUY":
-                queue.append({
-                    "date": day,
-                    "trade_type": "BUY",
-                    "type": "BUY",
-                    "quantity": float(lot["quantity"] or 0),
-                    "price": float(lot["price"] or 0),
-                    "notes": str(lot.get("notes") or "").strip(),
-                })
-            else:
-                sold = float(lot["quantity"] or 0)
-                while sold > 0 and queue:
-                    first = queue[0]
-                    matched_quantity = min(float(first["quantity"] or 0), sold)
-                    first["quantity"] -= matched_quantity
-                    sold -= matched_quantity
-                    if first["quantity"] <= 0:
-                        queue.pop(0)
-        for row in queue:
-            if float(row["quantity"] or 0) > 0:
-                available_lots.append({
-                    "date": day,
-                    "type": "BUY",
-                    "quantity": float(row["quantity"] or 0),
-                    "price": float(row["price"] or 0),
-                    "notes": str(row.get("notes") or "").strip(),
-                })
+    available_lots = fifo_open_lots(lots)
 
     remaining_lots = []
     for lot in sorted(available_lots, key=lambda item: (item["date"], float(item["price"] or 0))):

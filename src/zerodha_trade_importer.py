@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from src.portfolio import classify_asset
+
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "session.db"
 
@@ -119,6 +121,18 @@ def append_trade_rows_from_csv(csv_path: str | Path, db_path: Optional[str | Pat
         symbol = _clean(row.get("symbol") or row.get("tradingsymbol") or row.get("instrument_name") or row.get("name"))
         if not symbol:
             continue
+        isin = _clean(row.get("isin"))
+        security_asset_class = classify_asset({
+            "tradingsymbol": symbol,
+            "isin": isin,
+            "exchange": row.get("exchange"),
+            "segment": row.get("segment"),
+        })
+        row_asset_class = (
+            security_asset_class
+            if security_asset_class in {"debt", "metal", "mf"}
+            else resolved_asset_class
+        )
 
         trade_type = _normalize_trade_type(row.get("trade_type") or row.get("transaction_type") or row.get("type"))
         quantity = _parse_float(row.get("quantity") or row.get("qty") or row.get("filled_quantity") or row.get("pending_quantity"))
@@ -153,9 +167,9 @@ def append_trade_rows_from_csv(csv_path: str | Path, db_path: Optional[str | Pat
             """,
             (
                 str(csv_path),
-                resolved_asset_class,
+                row_asset_class,
                 symbol.upper(),
-                _clean(row.get("isin")),
+                isin,
                 trade_date,
                 _clean(row.get("exchange") or row.get("segment") or row.get("exchange_name")),
                 _clean(row.get("segment") or row.get("segment_name")),

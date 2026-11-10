@@ -374,7 +374,16 @@ async function refreshData() {
       throw new Error(data.error || 'Refresh failed');
     }
     updateHoldings(data);
-    setRefreshStatus('Portfolio refreshed successfully.', 'success');
+    const mfNavErrors = Array.isArray(data.mf_nav_errors) ? data.mf_nav_errors : [];
+    if (mfNavErrors.length) {
+      const affectedFunds = [...new Set(mfNavErrors.map((item) => item.fund || 'Unknown fund'))];
+      setRefreshStatus(
+        `Portfolio refreshed, but MF NAV could not be updated for: ${affectedFunds.join(', ')}.`,
+        'error'
+      );
+    } else {
+      setRefreshStatus('Portfolio refreshed successfully.', 'success');
+    }
   } catch (error) {
     console.error('Refresh error:', error);
     setRefreshStatus(`Refresh failed: ${error.message}`, 'error');

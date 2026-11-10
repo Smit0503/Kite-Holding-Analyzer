@@ -86,14 +86,22 @@ class KiteClient:
         response.raise_for_status()
         json_body = response.json()
         if isinstance(json_body, dict):
-            data = json_body.get("data")
+            if "data" not in json_body:
+                raise ValueError("Kite returned an unexpected MF holdings response.")
+            data = json_body["data"]
             if isinstance(data, list):
                 return data
             if isinstance(data, dict):
-                return data.get("holdings", []) or data.get("mf_holdings", []) or []
+                for key in ("holdings", "mf_holdings"):
+                    if key in data:
+                        holdings = data[key]
+                        if isinstance(holdings, list):
+                            return holdings
+                        raise ValueError("Kite returned an invalid MF holdings list.")
+                raise ValueError("Kite returned an unexpected MF holdings response.")
         if isinstance(json_body, list):
             return json_body
-        return []
+        raise ValueError("Kite returned an unexpected MF holdings response.")
 
     def refresh_mf_nav(self, holdings: list) -> list:
         """Refresh MF NAV values from the published NAV data using ISIN matching."""
@@ -107,8 +115,14 @@ class KiteClient:
                 refreshed.append(item)
                 continue
 
+            item.pop("nav_refresh_error", None)
             isin = str(item.get("tradingsymbol") or item.get("isin") or "").strip().upper()
             fund_name = str(item.get("fund") or item.get("scheme") or item.get("name") or "").strip()
+            if not isin or not fund_name:
+                item["nav_refresh_error"] = "Fund name or ISIN is missing."
+                refreshed.append(item)
+                continue
+
             try:
                 search = requests.get(
                     "https://api.mfapi.in/mf/search",
@@ -118,8 +132,9 @@ class KiteClient:
                 search.raise_for_status()
                 candidates = search.json()
                 if not isinstance(candidates, list):
-                    candidates = []
+                    raise ValueError("MFAPI returned an invalid scheme search response.")
 
+                matched_scheme = False
                 for candidate in candidates:
                     scheme_code = candidate.get("schemeCode") if isinstance(candidate, dict) else None
                     if not scheme_code:
@@ -132,15 +147,22 @@ class KiteClient:
                         str(meta.get(key) or "").upper()
                         for key in ("isin_growth", "isin_div_reinvestment")
                     }
-                    if isin and isin not in scheme_isins:
+                    if isin not in scheme_isins:
                         continue
+
+                    matched_scheme = True
                     data = scheme_json.get("data", []) if isinstance(scheme_json, dict) else []
                     if data:
                         item["last_price"] = float(data[0]["nav"])
                         item["last_price_date"] = str(data[0]["date"])
+                    else:
+                        item["nav_refresh_error"] = "No published NAV data was returned for the matching scheme."
                     break
+                if not matched_scheme:
+                    item["nav_refresh_error"] = f"No MFAPI scheme matched ISIN {isin}."
             except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
                 print(f"MF NAV refresh failed for {fund_name}: {exc}")
+                item["nav_refresh_error"] = str(exc)
 
             refreshed.append(item)
         return refreshed

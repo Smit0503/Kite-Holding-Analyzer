@@ -116,6 +116,57 @@ def classify_asset(item: Dict[str, Any]) -> str:
     return "equity"
 
 
+def fifo_open_lots(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return open BUY lots using the dashboard breakdown's same-day FIFO ordering."""
+    valid_events = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        trade_date = str(event.get("date") or "").split("T")[0]
+        if not trade_date:
+            continue
+        try:
+            quantity = float(event.get("quantity") or 0)
+            price = float(event.get("price") or 0)
+        except (TypeError, ValueError):
+            continue
+        valid_events.append({
+            **event,
+            "date": trade_date,
+            "type": str(event.get("type") or "BUY").upper(),
+            "quantity": quantity,
+            "price": price,
+        })
+
+    open_lots = []
+    for trade_date in sorted({event["date"] for event in valid_events}):
+        queue = []
+        daily_events = sorted(
+            (event for event in valid_events if event["date"] == trade_date),
+            key=lambda event: (event["type"] == "SELL", event["price"]),
+        )
+        for event in daily_events:
+            if event["type"] == "BUY":
+                if event["quantity"] > 0:
+                    queue.append({
+                        **event,
+                        "type": "BUY",
+                    })
+                continue
+            if event["type"] != "SELL":
+                continue
+            sold = abs(event["quantity"])
+            while sold > 0 and queue:
+                matched = min(queue[0]["quantity"], sold)
+                queue[0]["quantity"] -= matched
+                sold -= matched
+                if queue[0]["quantity"] <= 1e-9:
+                    queue.pop(0)
+        open_lots.extend(lot for lot in queue if lot["quantity"] > 1e-9)
+
+    return sorted(open_lots, key=lambda lot: (lot["date"], lot["price"]))
+
+
 def _portfolio_value_from_holdings(holdings: Dict[str, Any]) -> float:
     items = _extract_items(holdings)
     total = 0.0

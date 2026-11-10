@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Historical profit and loss for the portfolio lots still held today.">
+    <title>Portfolio history</title>
+    <style>
+      /* Hallmark · v2.0.0 */
+      /* Hallmark · pre-emit critique: P5 H5 E4 S4 R5 V4 · weakest: E, chart data honesty; surface missing prices and ledger gaps rather than drawing a partial line silently */
+      html, body { overflow-x: clip; }
+      :focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+      button:active, a:active { opacity: 0.92; transform: translateY(0); }
+      button:disabled, input:disabled { opacity: 0.68; cursor: not-allowed; }
+    </style>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/portfolio-history.css') }}">
+  </head>
+  <body>
+    <div class="shell history-shell">
+      <header class="topbar">
+        <div class="brand">Portfolio history</div>
+        <div class="header-actions">
+          <span class="chip">{{ user_name }}</span>
+          <a class="button ghost" href="/holdings">Holdings</a>
+        </div>
+      </header>
+
+      <main class="panel history-panel">
+        <div class="history-intro">
+          <h1>How today’s holdings got here</h1>
+          <p>Historical P&amp;L for open lots only. Positions sold in full and realized gains are excluded.</p>
+        </div>
+
+        <form class="history-filters" method="get" action="/portfolio-history">
+          <input type="hidden" name="period" id="history-period-input" value="{{ period }}">
+          <fieldset class="history-asset-filters">
+            <legend>Asset class</legend>
+            <div class="multi-filter-group">
+              <label class="filter-pill">
+                <input type="checkbox" name="filter" value="all" {% if 'all' in selected_assets %}checked{% endif %}>
+                All
+              </label>
+              {% for asset in ['equity', 'mf', 'debt', 'metal'] %}
+                <label class="filter-pill">
+                  <input type="checkbox" name="filter" value="{{ asset }}" {% if asset in selected_assets %}checked{% endif %}>
+                  {{ asset|capitalize }}
+                </label>
+              {% endfor %}
+            </div>
+          </fieldset>
+          <button type="submit" class="button primary history-apply">Apply</button>
+        </form>
+
+        <div class="history-period-row">
+          <span class="history-period-label">Range</span>
+          <div class="history-periods" role="group" aria-label="Chart period">
+            {% for option in ['1M', '3M', '6M', '1Y', '3Y', '5Y'] %}
+              <button
+                type="button"
+                class="history-period-button"
+                data-history-period="{{ option }}"
+                aria-pressed="{{ 'true' if option == period else 'false' }}"
+              >{{ option }}</button>
+            {% endfor %}
+          </div>
+          <span id="history-date-range" class="history-date-range"></span>
+        </div>
+
+        <section class="history-summary" aria-label="Selected period results">
+          <div class="history-summary-value">
+            <span class="label">P&amp;L at period end</span>
+            <strong id="history-latest-pnl">Not loaded</strong>
+          </div>
+          <div class="history-summary-value">
+            <span class="label">Return on cost</span>
+            <strong id="history-latest-pct">Not loaded</strong>
+          </div>
+          <p id="history-data-status" class="history-data-status" role="status" aria-live="polite">
+            Loading price history
+          </p>
+        </section>
+
+        <div class="history-chart-heading">
+          <div class="history-legend" aria-label="Chart series">
+            <span><i class="legend-line legend-line-pnl" aria-hidden="true"></i> P&amp;L amount</span>
+          </div>
+          <span class="history-axis-note">Rupees on the left axis; return % scale on the right. Hover over the line for both values.</span>
+        </div>
+
+        <div class="history-chart-wrap">
+          <svg
+            id="portfolio-history-chart"
+            class="history-chart"
+            viewBox="0 0 1000 430"
+            role="img"
+            aria-labelledby="history-chart-title history-chart-description"
+            preserveAspectRatio="xMidYMid meet"
+          >
+            <title id="history-chart-title">Portfolio profit and loss history</title>
+            <desc id="history-chart-description">Loading historical portfolio profit and loss.</desc>
+          </svg>
+          <div id="history-chart-tooltip" class="history-chart-tooltip" role="status" hidden></div>
+          <div id="history-empty" class="history-empty" hidden>
+            <strong>No chartable history for this selection</strong>
+            <span>Refresh the tradebook and holdings, or check the data notes below for missing price history.</span>
+            <a class="button ghost" href="/holdings">Review holdings</a>
+          </div>
+        </div>
+
+        <div id="history-warnings" class="history-notes" hidden>
+          <h2>Data notes</h2>
+          <ul id="history-warning-list"></ul>
+        </div>
+        <p class="history-method">
+          Return % is P&amp;L divided by the cost basis of the currently held units that had been purchased by that date.
+          The latest chart point uses current holding prices and average cost, so it matches Holdings P&amp;L.
+          Equity, debt, and metal use IndianAPI historical prices matched by
+          trading symbol or ISIN; mutual funds use historical NAVs matched to
+          the holding ISIN. Prices are cached locally.
+          Same-day trades follow the Holdings breakdown FIFO rule: buys are processed before sells.
+        </p>
+      </main>
+    </div>
+    <script src="{{ url_for('static', filename='js/portfolio_history.js') }}"></script>
+  </body>
+</html>
