@@ -45,6 +45,20 @@
               {% endfor %}
             </div>
           </fieldset>
+          <fieldset class="history-return-filter">
+            <legend>Returns</legend>
+            <label class="filter-pill">
+              <input
+                type="checkbox"
+                id="history-include-realized"
+                name="include_realized_returns"
+                value="1"
+                {% if include_realized_returns %}checked{% endif %}
+              >
+              Include realized P&amp;L
+            </label>
+            <small>Tradebook lacks CNC/MIS labels; same-day equal buy/sell quantities are skipped as likely MIS.</small>
+          </fieldset>
           <button type="submit" class="button primary history-apply">Apply</button>
         </form>
 
@@ -121,26 +135,93 @@
             <h2 id="history-breakdown-title">Portfolio on <span id="history-breakdown-date"></span></h2>
             <p id="history-breakdown-status" role="status" aria-live="polite"></p>
           </div>
-          <div class="table-wrap history-breakdown-table-wrap">
-            <table class="history-breakdown-table">
-              <thead>
-                <tr>
-                  {% for key, label in [('symbol', 'Portfolio'), ('asset', 'Asset'), ('quantity', 'Quantity'), ('price', 'Price'), ('invested', 'Invested value'), ('current_value', 'Current value'), ('pnl', 'Profit / loss')] %}
-                    <th data-sort-key="{{ key }}" aria-sort="none">
-                      <button type="button" class="sort-button" data-sort-key="{{ key }}" aria-label="Sort by {{ label|lower }}">
-                        <span class="sort-label">{{ label }}</span>
-                        <span class="sort-arrows" aria-hidden="true">
-                          <span class="sort-arrow sort-arrow-up">▲</span>
-                          <span class="sort-arrow sort-arrow-down">▼</span>
-                        </span>
-                      </button>
-                    </th>
-                  {% endfor %}
-                </tr>
-              </thead>
-              <tbody id="history-breakdown-rows"></tbody>
-              <tfoot id="history-breakdown-total" hidden></tfoot>
-            </table>
+          <div id="history-breakdown-standard">
+            <div class="table-wrap history-breakdown-table-wrap">
+              <table class="history-breakdown-table">
+                <thead>
+                  <tr>
+                    {% for key, label in [('symbol', 'Portfolio'), ('asset', 'Asset'), ('quantity', 'Quantity'), ('price', 'Price'), ('invested', 'Invested value'), ('current_value', 'Current value'), ('pnl', 'Profit / loss')] %}
+                      <th data-sort-key="{{ key }}" aria-sort="none">
+                        <button type="button" class="sort-button" data-sort-key="{{ key }}" aria-label="Sort by {{ label|lower }}">
+                          <span class="sort-label">{{ label }}</span>
+                          <span class="sort-arrows" aria-hidden="true">
+                            <span class="sort-arrow sort-arrow-up">▲</span>
+                            <span class="sort-arrow sort-arrow-down">▼</span>
+                          </span>
+                        </button>
+                      </th>
+                    {% endfor %}
+                  </tr>
+                </thead>
+                <tbody id="history-breakdown-rows"></tbody>
+                <tfoot id="history-breakdown-total" hidden></tfoot>
+              </table>
+            </div>
+          </div>
+          <div id="history-breakdown-sections" class="history-breakdown-sections" hidden>
+            <section class="history-breakdown-group history-breakdown-group-current" aria-labelledby="history-current-title">
+              <h3 id="history-current-title">Holdings still held today</h3>
+              <p id="history-current-status" class="history-breakdown-group-status"></p>
+              <div class="table-wrap history-breakdown-table-wrap">
+                <table class="history-breakdown-table">
+                  <thead>
+                    <tr>
+                      {% for key, label in [('symbol', 'Portfolio'), ('asset', 'Asset'), ('quantity', 'Quantity'), ('price', 'Price'), ('invested', 'Invested value'), ('current_value', 'Current value'), ('pnl', 'Profit / loss')] %}
+                        <th data-sort-key="{{ key }}" aria-sort="none">
+                          <button type="button" class="sort-button" data-sort-key="{{ key }}" aria-label="Sort by {{ label|lower }}">
+                            <span class="sort-label">{{ label }}</span>
+                            <span class="sort-arrows" aria-hidden="true">
+                              <span class="sort-arrow sort-arrow-up">▲</span>
+                              <span class="sort-arrow sort-arrow-down">▼</span>
+                            </span>
+                          </button>
+                        </th>
+                      {% endfor %}
+                    </tr>
+                  </thead>
+                  <tbody id="history-current-rows"></tbody>
+                  <tfoot id="history-current-total" hidden></tfoot>
+                </table>
+              </div>
+            </section>
+            <section class="history-breakdown-group history-breakdown-group-former" aria-labelledby="history-former-title">
+              <h3 id="history-former-title">Stocks held on this date, not today</h3>
+              <p id="history-former-status" class="history-breakdown-group-status"></p>
+              <div class="table-wrap history-breakdown-table-wrap">
+                <table class="history-breakdown-table">
+                  <thead>
+                    <tr>
+                      {% for key, label in [('symbol', 'Portfolio'), ('asset', 'Asset'), ('quantity', 'Quantity'), ('price', 'Price'), ('invested', 'Invested value'), ('current_value', 'Current value'), ('pnl', 'Profit / loss')] %}
+                        <th data-sort-key="{{ key }}" aria-sort="none">
+                          <button type="button" class="sort-button" data-sort-key="{{ key }}" aria-label="Sort by {{ label|lower }}">
+                            <span class="sort-label">{{ label }}</span>
+                            <span class="sort-arrows" aria-hidden="true">
+                              <span class="sort-arrow sort-arrow-up">▲</span>
+                              <span class="sort-arrow sort-arrow-down">▼</span>
+                            </span>
+                          </button>
+                        </th>
+                      {% endfor %}
+                    </tr>
+                  </thead>
+                  <tbody id="history-former-rows"></tbody>
+                  <tfoot id="history-former-total" hidden></tfoot>
+                </table>
+              </div>
+            </section>
+            <section class="history-breakdown-group history-breakdown-group-realized" aria-labelledby="history-realized-title">
+              <h3 id="history-realized-title">Realized P&amp;L through this date</h3>
+              <p id="history-realized-status" class="history-breakdown-group-status"></p>
+              <div class="table-wrap history-breakdown-table-wrap">
+                <table class="history-breakdown-table history-realized-table">
+                  <thead>
+                    <tr><th>Stock</th><th class="numeric">Realized profit / loss</th></tr>
+                  </thead>
+                  <tbody id="history-realized-rows"></tbody>
+                  <tfoot id="history-realized-total" hidden></tfoot>
+                </table>
+              </div>
+            </section>
           </div>
         </section>
 

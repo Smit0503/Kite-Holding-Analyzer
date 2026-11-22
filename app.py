@@ -11,6 +11,7 @@ from src.kite_client import KiteClient
 from src.portfolio import (
     calculate_metrics,
     classify_asset,
+    exclude_intraday_round_trips,
     fifo_open_lots,
     fifo_purchase_date_for_holding,
     fifo_realized_pnl,
@@ -147,17 +148,6 @@ def calculate_symbol_xirr(symbol, asset_class, current_price, current_quantity, 
                 "price": price,
             })
 
-    daily_totals = {}
-    for event in events:
-        totals = daily_totals.setdefault(event["date"], {"BUY": 0.0, "SELL": 0.0})
-        totals[event["type"]] += event["quantity"]
-    intraday_round_trip_dates = {
-        day
-        for day, totals in daily_totals.items()
-        if totals["BUY"] > 0
-        and totals["SELL"] > 0
-        and abs(totals["BUY"] - totals["SELL"]) <= 1e-6
-    }
     adjustment_events = []
     for row in adjustments:
         try:
@@ -174,10 +164,7 @@ def calculate_symbol_xirr(symbol, asset_class, current_price, current_quantity, 
                 "price": amount,
             })
 
-    open_lots = fifo_open_lots([
-        event for event in events
-        if event["date"] not in intraday_round_trip_dates
-    ] + adjustment_events)
+    open_lots = fifo_open_lots(exclude_intraday_round_trips(events) + adjustment_events)
     open_lots.sort(key=lambda lot: (lot["date"], lot["price"]))
     remaining_quantity = numeric(current_quantity)
     if sum(lot["quantity"] for lot in open_lots) > remaining_quantity + 1e-6:
@@ -913,10 +900,12 @@ def portfolio_history_page():
     period = request.args.get("period", "1M").upper()
     if period not in HISTORY_PERIODS:
         period = "1M"
+    include_realized_returns = request.args.get("include_realized_returns") in {"1", "true", "on"}
     return render_template(
         "portfolio_history.html",
         selected_assets=selected_assets,
         period=period,
+        include_realized_returns=include_realized_returns,
         asset_classes=sorted(HISTORY_ASSET_CLASSES),
         user_name=(SESSION.get("user") or {}).get("user_name") or (SESSION.get("user") or {}).get("name") or "User",
     )
@@ -931,6 +920,7 @@ def api_portfolio_history():
 
     selected_assets = parse_asset_filters(request.args.getlist("filter"))
     period = request.args.get("period", "1M").upper()
+    include_realized_returns = request.args.get("include_realized_returns") in {"1", "true", "on"}
     if period not in HISTORY_PERIODS:
         return jsonify({"error": f"Unsupported period: {period}."}), 400
     try:
@@ -940,6 +930,7 @@ def api_portfolio_history():
             selected_assets=selected_assets,
             period=period,
             db_path=DB_PATH,
+            include_realized_returns=include_realized_returns,
         )
         return jsonify(result), 200
     except (ValueError, RuntimeError) as exc:
@@ -957,6 +948,7 @@ def api_portfolio_history_details():
 
     selected_date = request.args.get("date", "")
     selected_assets = parse_asset_filters(request.args.getlist("filter"))
+    include_realized_returns = request.args.get("include_realized_returns") in {"1", "true", "on"}
     try:
         result = build_portfolio_history_breakdown(
             holdings=SESSION.get("holdings"),
@@ -964,6 +956,7 @@ def api_portfolio_history_details():
             selected_assets=selected_assets,
             selected_date=selected_date,
             db_path=DB_PATH,
+            include_realized_returns=include_realized_returns,
         )
         return jsonify(result), 200
     except (ValueError, RuntimeError) as exc:

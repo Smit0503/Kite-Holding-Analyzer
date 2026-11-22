@@ -167,6 +167,30 @@ def fifo_open_lots(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(open_lots, key=lambda lot: (lot["date"], lot["price"]))
 
 
+def exclude_intraday_round_trips(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Exclude symbol-level trade dates with equal BUY and SELL quantities."""
+    valid_events = [event for event in events if isinstance(event, dict)]
+    daily_totals = defaultdict(lambda: {"BUY": 0.0, "SELL": 0.0})
+    for event in valid_events:
+        day = str(event.get("date") or "").split("T")[0]
+        trade_type = str(event.get("type") or "").upper()
+        if day and trade_type in {"BUY", "SELL"}:
+            daily_totals[day][trade_type] += _safe_float(event.get("quantity"))
+
+    intraday_round_trip_dates = {
+        day
+        for day, totals in daily_totals.items()
+        if totals["BUY"] > 0
+        and totals["SELL"] > 0
+        and abs(totals["BUY"] - totals["SELL"]) <= 1e-6
+    }
+    return [
+        event
+        for event in valid_events
+        if str(event.get("date") or "").split("T")[0] not in intraday_round_trip_dates
+    ]
+
+
 def _portfolio_value_from_holdings(holdings: Dict[str, Any]) -> float:
     items = _extract_items(holdings)
     total = 0.0

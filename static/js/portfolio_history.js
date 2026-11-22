@@ -381,9 +381,20 @@ function resetBreakdown() {
   if (activeBreakdownRequest) activeBreakdownRequest.abort();
   activeBreakdownRequest = null;
   document.getElementById('history-breakdown').hidden = true;
-  document.getElementById('history-breakdown-rows').replaceChildren();
-  document.getElementById('history-breakdown-total').replaceChildren();
-  document.getElementById('history-breakdown-total').hidden = true;
+  [
+    'history-breakdown-rows',
+    'history-breakdown-total',
+    'history-current-rows',
+    'history-current-total',
+    'history-former-rows',
+    'history-former-total',
+    'history-realized-rows',
+    'history-realized-total',
+  ].forEach((id) => {
+    const element = document.getElementById(id);
+    element.replaceChildren();
+    if (element.tagName === 'TFOOT') element.hidden = true;
+  });
 }
 
 function breakdownSortEntry(key) {
@@ -412,8 +423,8 @@ function breakdownSortValue(row, key) {
   return Number(value || 0);
 }
 
-function sortBreakdownRows() {
-  const tbody = document.getElementById('history-breakdown-rows');
+function sortBreakdownRows(tbodyId = 'history-breakdown-rows') {
+  const tbody = document.getElementById(tbodyId);
   const rows = Array.from(tbody.querySelectorAll('tr[data-sort-row="true"]'));
   rows.sort((rowA, rowB) => {
     for (const entry of breakdownSortState) {
@@ -448,20 +459,45 @@ function renderBreakdownSortIndicators() {
 
 function renderBreakdown(result) {
   const section = document.getElementById('history-breakdown');
-  const tbody = document.getElementById('history-breakdown-rows');
-  const footer = document.getElementById('history-breakdown-total');
+  const standardTable = document.getElementById('history-breakdown-standard');
+  const sectionsTable = document.getElementById('history-breakdown-sections');
   document.getElementById('history-breakdown-date').textContent = formatFullDate(result.date);
-  document.getElementById('history-breakdown-status').textContent = result.rows.length
-    ? `${result.rows.length} holdings`
-    : 'No priced holdings for this date.';
+  if (result.include_realized_returns) {
+    standardTable.hidden = true;
+    sectionsTable.hidden = false;
+    renderHoldingsBreakdownTable(result.current_rows || [], 'history-current-rows', 'history-current-total');
+    renderHoldingsBreakdownTable(result.former_rows || [], 'history-former-rows', 'history-former-total');
+    renderRealizedBreakdownTable(result.realized_rows || [], result.realized_total || 0);
+    document.getElementById('history-breakdown-status').textContent = [
+      `${(result.current_rows || []).length} current holdings`,
+      `${(result.former_rows || []).length} former holdings`,
+      `${(result.realized_rows || []).length} realized stocks`,
+    ].join(' · ');
+  } else {
+    standardTable.hidden = false;
+    sectionsTable.hidden = true;
+    renderHoldingsBreakdownTable(result.rows || [], 'history-breakdown-rows', 'history-breakdown-total');
+    document.getElementById('history-breakdown-status').textContent = result.rows.length
+      ? `${result.rows.length} holdings`
+      : 'No priced holdings for this date.';
+  }
+
+  renderBreakdownSortIndicators();
+  section.hidden = false;
+  section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function renderHoldingsBreakdownTable(rows, tbodyId, footerId) {
+  const tbody = document.getElementById(tbodyId);
+  const footer = document.getElementById(footerId);
   tbody.replaceChildren();
   footer.replaceChildren();
-
   const totals = { invested: 0, current_value: 0, pnl: 0 };
-  result.rows.forEach((holding) => {
+  const missingValuation = rows.some((holding) => holding.current_value == null || holding.pnl == null);
+  rows.forEach((holding) => {
     totals.invested += Number(holding.invested);
-    totals.current_value += Number(holding.current_value);
-    totals.pnl += Number(holding.pnl);
+    if (holding.current_value != null) totals.current_value += Number(holding.current_value);
+    if (holding.pnl != null) totals.pnl += Number(holding.pnl);
     const row = document.createElement('tr');
     row.dataset.sortRow = 'true';
     row.dataset.symbol = holding.symbol;
@@ -476,23 +512,23 @@ function renderBreakdown(result) {
       [holding.symbol, 'text'],
       [holding.asset_class.toUpperCase(), 'text'],
       [Number(holding.quantity).toLocaleString('en-IN', { maximumFractionDigits: 3 }), 'numeric'],
-      [formatCurrency(holding.price), 'numeric'],
+      [holding.price == null ? 'Not available' : formatCurrency(holding.price), 'numeric'],
       [formatCurrency(holding.invested), 'numeric'],
-      [formatCurrency(holding.current_value), 'numeric'],
-      [formatSignedCurrency(holding.pnl), 'numeric'],
+      [holding.current_value == null ? 'Not available' : formatCurrency(holding.current_value), 'numeric'],
+      [holding.pnl == null ? 'Not available' : formatSignedCurrency(holding.pnl), 'numeric'],
     ];
     values.forEach(([value, className], index) => {
       const cell = document.createElement('td');
       cell.classList.toggle('numeric', className === 'numeric');
       cell.textContent = value;
       if (index === 0 && holding.name && holding.name !== holding.symbol) cell.title = holding.name;
-      if (index === 6) cell.classList.add(holding.pnl >= 0 ? 'positive' : 'negative');
+      if (index === 6 && holding.pnl != null) cell.classList.add(holding.pnl >= 0 ? 'positive' : 'negative');
       row.appendChild(cell);
     });
     tbody.appendChild(row);
   });
 
-  if (result.rows.length) {
+  if (rows.length) {
     const totalRow = document.createElement('tr');
     const label = document.createElement('td');
     label.colSpan = 4;
@@ -501,8 +537,14 @@ function renderBreakdown(result) {
     ['invested', 'current_value', 'pnl'].forEach((key) => {
       const cell = document.createElement('td');
       cell.className = 'numeric';
-      cell.textContent = key === 'pnl' ? formatSignedCurrency(totals[key]) : formatCurrency(totals[key]);
-      if (key === 'pnl') cell.classList.add(totals.pnl >= 0 ? 'positive' : 'negative');
+      if (key === 'pnl' && missingValuation) {
+        cell.textContent = 'Not available';
+      } else if (key === 'current_value' && missingValuation) {
+        cell.textContent = 'Not available';
+      } else {
+        cell.textContent = key === 'pnl' ? formatSignedCurrency(totals[key]) : formatCurrency(totals[key]);
+      }
+      if (key === 'pnl' && !missingValuation) cell.classList.add(totals.pnl >= 0 ? 'positive' : 'negative');
       totalRow.appendChild(cell);
     });
     footer.appendChild(totalRow);
@@ -510,25 +552,70 @@ function renderBreakdown(result) {
   } else {
     footer.hidden = true;
   }
+  sortBreakdownRows(tbodyId);
+  const statusId = tbodyId === 'history-current-rows'
+    ? 'history-current-status'
+    : tbodyId === 'history-former-rows'
+      ? 'history-former-status'
+      : null;
+  if (statusId) {
+    document.getElementById(statusId).textContent = rows.length
+      ? `${rows.length} holdings`
+      : 'No holdings to show for this date.';
+  }
+}
 
-  sortBreakdownRows();
-  renderBreakdownSortIndicators();
-  section.hidden = false;
-  section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+function renderRealizedBreakdownTable(rows, total) {
+  const tbody = document.getElementById('history-realized-rows');
+  const footer = document.getElementById('history-realized-total');
+  tbody.replaceChildren();
+  footer.replaceChildren();
+  rows.forEach((holding) => {
+    const row = document.createElement('tr');
+    const symbol = document.createElement('td');
+    symbol.textContent = holding.symbol;
+    const pnl = document.createElement('td');
+    pnl.className = 'numeric';
+    pnl.textContent = formatSignedCurrency(holding.pnl);
+    pnl.classList.add(holding.pnl >= 0 ? 'positive' : 'negative');
+    row.append(symbol, pnl);
+    tbody.appendChild(row);
+  });
+  document.getElementById('history-realized-status').textContent = rows.length
+    ? `${rows.length} stocks with realized P&L`
+    : 'No realized P&L through this date.';
+  if (rows.length) {
+    const totalRow = document.createElement('tr');
+    const label = document.createElement('td');
+    label.textContent = 'Total';
+    const pnl = document.createElement('td');
+    pnl.className = 'numeric';
+    pnl.textContent = formatSignedCurrency(total);
+    pnl.classList.add(total >= 0 ? 'positive' : 'negative');
+    totalRow.append(label, pnl);
+    footer.appendChild(totalRow);
+    footer.hidden = false;
+  } else {
+    footer.hidden = true;
+  }
 }
 
 async function loadBreakdown(selectedDate) {
-  if (activeBreakdownRequest) activeBreakdownRequest.abort();
+  resetBreakdown();
   activeBreakdownRequest = new AbortController();
   const section = document.getElementById('history-breakdown');
   section.hidden = false;
   document.getElementById('history-breakdown-date').textContent = formatFullDate(selectedDate);
   document.getElementById('history-breakdown-status').textContent = 'Loading details…';
-  document.getElementById('history-breakdown-rows').replaceChildren();
-  document.getElementById('history-breakdown-total').hidden = true;
-
   const params = new URLSearchParams({ date: selectedDate });
-  selectedAssets().forEach((asset) => params.append('filter', asset));
+  const assets = selectedAssets();
+  assets.forEach((asset) => params.append('filter', asset));
+  if (
+    document.getElementById('history-include-realized').checked
+    && (assets.includes('all') || assets.includes('equity'))
+  ) {
+    params.set('include_realized_returns', '1');
+  }
   try {
     const response = await fetch(`/api/portfolio-history/details?${params.toString()}`, {
       cache: 'no-store',
@@ -549,6 +636,9 @@ async function loadHistory(period) {
   const params = new URLSearchParams();
   params.set('period', period);
   selectedAssets().forEach((asset) => params.append('filter', asset));
+  if (document.getElementById('history-include-realized').checked) {
+    params.set('include_realized_returns', '1');
+  }
   if (activeRequest) activeRequest.abort();
   activeRequest = new AbortController();
   chartPan = null;
@@ -628,7 +718,8 @@ window.addEventListener('pointercancel', finishChartPan);
 document.querySelectorAll('.history-breakdown-table .sort-button').forEach((button) => {
   button.addEventListener('click', () => {
     toggleBreakdownSort(button.dataset.sortKey);
-    sortBreakdownRows();
+    const tbody = button.closest('table').querySelector('tbody');
+    sortBreakdownRows(tbody.id);
     renderBreakdownSortIndicators();
   });
 });

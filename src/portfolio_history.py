@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
-from src.portfolio import classify_asset, fifo_open_lots
+from src.portfolio import classify_asset, exclude_intraday_round_trips, fifo_open_lots
 
 
 PERIOD_DAYS = {
@@ -730,6 +730,277 @@ def _points_for_lots(
     return output
 
 
+def _equity_ledger_events(
+    conn: sqlite3.Connection,
+    end: date,
+) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
+    trades_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
+    adjustments_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
+
+    trade_rows = conn.execute(
+        """
+        SELECT id, asset_class, symbol, isin, trade_date, trade_type, quantity, price
+        FROM trade_imports
+        WHERE lower(coalesce(asset_class, '')) IN ('', 'equity')
+        ORDER BY date(trade_date), id
+        """
+    ).fetchall()
+    for row in trade_rows:
+        symbol = _clean(row["symbol"]).upper()
+        if not _clean(row["asset_class"]) and classify_asset({
+            "tradingsymbol": symbol,
+            "isin": row["isin"],
+        }) != "equity":
+            continue
+        identity = _normalized_name(symbol) or _clean(row["isin"]).upper()
+        day = _date_value(row["trade_date"])
+        trade_type = _clean(row["trade_type"]).upper()
+        try:
+            quantity = abs(float(row["quantity"] or 0))
+            price = float(row["price"] or 0)
+        except (TypeError, ValueError):
+            continue
+        if not identity or not day or day > end or trade_type not in {"BUY", "SELL"}:
+            continue
+        if quantity <= 0 or price <= 0:
+            continue
+        trades_by_symbol.setdefault(identity, []).append({
+            "date": day.isoformat(),
+            "type": trade_type,
+            "quantity": quantity,
+            "price": price,
+            "id": row["id"],
+            "symbol": symbol,
+            "isin": _clean(row["isin"]).upper(),
+        })
+
+    adjustment_rows = conn.execute(
+        """
+        SELECT id, asset_class, symbol, isin, purchase_date, quantity, amount
+        FROM trade_adjustments
+        WHERE lower(coalesce(asset_class, '')) IN ('', 'equity')
+        ORDER BY date(purchase_date), id
+        """
+    ).fetchall()
+    for row in adjustment_rows:
+        symbol = _clean(row["symbol"]).upper()
+        if not _clean(row["asset_class"]) and classify_asset({
+            "tradingsymbol": symbol,
+            "isin": row["isin"],
+        }) != "equity":
+            continue
+        identity = _normalized_name(symbol) or _clean(row["isin"]).upper()
+        day = _date_value(row["purchase_date"])
+        try:
+            quantity = abs(float(row["quantity"] or 0))
+            price = float(row["amount"] or 0)
+        except (TypeError, ValueError):
+            continue
+        if not identity or not day or day > end or quantity <= 0:
+            continue
+        adjustments_by_symbol.setdefault(identity, []).append({
+            "date": day.isoformat(),
+            "type": "BUY",
+            "quantity": quantity,
+            "price": price,
+            "id": row["id"],
+            "symbol": symbol,
+            "isin": _clean(row["isin"]).upper(),
+        })
+    return trades_by_symbol, adjustments_by_symbol
+
+
+def _realized_equity_pnl_by_instrument(
+    conn: sqlite3.Connection,
+    end: date,
+) -> Dict[str, Dict[str, Any]]:
+    trades_by_symbol, adjustments_by_symbol = _equity_ledger_events(conn, end)
+    realized_by_instrument = {}
+    identities = set(trades_by_symbol) | set(adjustments_by_symbol)
+    for identity in identities:
+        trades = exclude_intraday_round_trips(trades_by_symbol.get(identity, []))
+        events = trades + adjustments_by_symbol.get(identity, [])
+        events.sort(key=lambda event: (
+            event["date"],
+            event["type"] == "SELL",
+            event["price"],
+            event["id"],
+        ))
+        open_lots = []
+        index = 0
+        while index < len(events):
+            trade_day = events[index]["date"]
+            day_events = []
+            while index < len(events) and events[index]["date"] == trade_day:
+                day_events.append(events[index])
+                index += 1
+            day_events.sort(key=lambda event: (
+                event["type"] == "SELL",
+                event["price"],
+                event["id"],
+            ))
+            for event in day_events:
+                if event["type"] == "BUY":
+                    open_lots.append({
+                        "quantity": event["quantity"],
+                        "price": event["price"],
+                    })
+                    continue
+                remaining = event["quantity"]
+                realized = 0.0
+                while remaining > 1e-9 and open_lots:
+                    lot = open_lots[0]
+                    matched = min(remaining, lot["quantity"])
+                    realized += matched * (event["price"] - lot["price"])
+                    lot["quantity"] -= matched
+                    remaining -= matched
+                    if lot["quantity"] <= 1e-9:
+                        open_lots.pop(0)
+                if remaining < event["quantity"]:
+                    realized_day = date.fromisoformat(trade_day)
+                    instrument = realized_by_instrument.setdefault(
+                        identity,
+                        {
+                            "symbol": event.get("symbol") or identity,
+                            "daily_pnl": {},
+                        },
+                    )
+                    instrument["daily_pnl"][realized_day] = (
+                        instrument["daily_pnl"].get(realized_day, 0.0) + realized
+                    )
+
+    return realized_by_instrument
+
+
+def _realized_equity_pnl_by_date(
+    conn: sqlite3.Connection,
+    end: date,
+) -> Dict[date, float]:
+    totals: Dict[date, float] = {}
+    for instrument in _realized_equity_pnl_by_instrument(conn, end).values():
+        for day, pnl in instrument["daily_pnl"].items():
+            totals[day] = totals.get(day, 0.0) + pnl
+    return totals
+
+
+def _historical_open_lots(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    lots = []
+    ordered_events = sorted(
+        events,
+        key=lambda event: (
+            event["date"],
+            event["type"] == "SELL",
+            event["price"],
+            event["id"],
+        ),
+    )
+    for event in ordered_events:
+        if event["type"] == "BUY":
+            lots.append({
+                **event,
+                "type": "BUY",
+            })
+            continue
+        if event["type"] != "SELL":
+            continue
+        remaining = event["quantity"]
+        while remaining > 1e-9 and lots:
+            matched = min(remaining, lots[0]["quantity"])
+            lots[0]["quantity"] -= matched
+            remaining -= matched
+            if lots[0]["quantity"] <= 1e-9:
+                lots.pop(0)
+    return sorted(
+        (lot for lot in lots if lot["quantity"] > 1e-9),
+        key=lambda lot: (lot["date"], lot["price"]),
+    )
+
+
+def _equity_positions_on_date(
+    conn: sqlite3.Connection,
+    day: date,
+) -> List[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
+    trades_by_symbol, adjustments_by_symbol = _equity_ledger_events(conn, day)
+    positions = []
+    for identity in set(trades_by_symbol) | set(adjustments_by_symbol):
+        events = exclude_intraday_round_trips(trades_by_symbol.get(identity, []))
+        events.extend(adjustments_by_symbol.get(identity, []))
+        lots = _historical_open_lots(events)
+        quantity = sum(float(lot["quantity"]) for lot in lots)
+        if quantity <= 0:
+            continue
+        symbol = next(
+            (event["symbol"] for event in events if event.get("symbol")),
+            identity,
+        )
+        isin = next((event["isin"] for event in events if event.get("isin")), "")
+        cost_basis = sum(float(lot["quantity"]) * float(lot["price"]) for lot in lots)
+        position = {
+            "instrument_key": isin or f"equity:{identity}",
+            "asset_class": "equity",
+            "symbol": symbol,
+            "isin": isin,
+            "exchange": "NSE",
+            "name": symbol,
+            "quantity": quantity,
+            "average_price": cost_basis / quantity,
+            "current_price": 0.0,
+            "nse_series": "EQ",
+        }
+        positions.append((position, lots))
+    return positions
+
+
+def _merge_realized_equity_pnl(
+    points: List[Dict[str, Any]],
+    realized_by_date: Dict[date, float],
+    start: date,
+    end: date,
+) -> List[Dict[str, Any]]:
+    if not points and not realized_by_date:
+        return []
+
+    base_points = sorted(points, key=lambda point: point["date"])
+    base_dates = [date.fromisoformat(point["date"]) for point in base_points]
+    realized_dates = {
+        day for day in realized_by_date
+        if start <= day <= end
+    }
+    chart_dates = set(base_dates) | realized_dates
+    if not base_points:
+        chart_dates.update({start, end})
+    elif end not in chart_dates:
+        chart_dates.add(end)
+
+    all_realized = sorted(realized_by_date.items())
+    cumulative = 0.0
+    realized_index = 0
+    output = []
+    for day in sorted(chart_dates):
+        while realized_index < len(all_realized) and all_realized[realized_index][0] <= day:
+            cumulative += all_realized[realized_index][1]
+            realized_index += 1
+
+        base_index = bisect_right(base_dates, day) - 1
+        if base_index >= 0:
+            point = dict(base_points[base_index])
+        else:
+            point = {
+                "date": day.isoformat(),
+                "pnl": 0.0,
+                "pnl_pct": 0.0,
+                "invested": 0.0,
+                "current_value": 0.0,
+            }
+        invested = float(point.get("invested") or 0)
+        point["date"] = day.isoformat()
+        point["pnl"] = round(float(point.get("pnl") or 0) + cumulative, 2)
+        point["pnl_pct"] = round((point["pnl"] / invested) * 100, 4) if invested else 0.0
+        point["current_value"] = round(float(point.get("current_value") or 0) + cumulative, 2)
+        output.append(point)
+    return output
+
+
 def _modified_dietz_return(
     points: List[Dict[str, Any]],
     lots_by_key: Dict[str, List[Dict[str, Any]]],
@@ -842,6 +1113,7 @@ def build_portfolio_history_breakdown(
     selected_assets: Iterable[str],
     selected_date: str,
     db_path: Optional[str | Path] = None,
+    include_realized_returns: bool = False,
 ) -> Dict[str, Any]:
     day = _date_value(selected_date)
     if not day:
@@ -858,15 +1130,56 @@ def build_portfolio_history_breakdown(
         raise ValueError(f"Unsupported asset filters: {', '.join(sorted(invalid))}")
 
     positions = _position_map(holdings, mf_holdings, selected)
-    if not positions:
-        return {"date": day.isoformat(), "rows": [], "warnings": []}
-
     ensure_history_tables(db_path)
     conn = _connect(db_path)
     rows = []
     warnings = []
+    section_rows: Dict[str, List[Dict[str, Any]]] = {
+        "current": [],
+        "former": [],
+        "realized": [],
+    }
+    include_equity_sections = include_realized_returns and "equity" in selected
+    historical_positions = []
+    price_jobs = []
     try:
+        if include_equity_sections:
+            realized_by_instrument = _realized_equity_pnl_by_instrument(conn, day)
+            for instrument in realized_by_instrument.values():
+                realized_pnl = sum(instrument["daily_pnl"].values())
+                section_rows["realized"].append({
+                    "symbol": instrument["symbol"],
+                    "pnl": round(realized_pnl, 2),
+                })
+            warnings.append(
+                "Realized equity P&L uses the imported trade ledger and excludes same-day equal buy/sell quantities as likely MIS."
+            )
+
+            if day < today:
+                today_symbols = {
+                    _normalized_name(position["symbol"])
+                    for position in positions
+                    if position["asset_class"] == "equity" and position["symbol"]
+                }
+                today_isins = {
+                    _clean(position["isin"]).upper()
+                    for position in positions
+                    if position["asset_class"] == "equity" and position["isin"]
+                }
+                historical_positions = _equity_positions_on_date(conn, day)
+                for position, lots in historical_positions:
+                    is_current = (
+                        _normalized_name(position["symbol"]) in today_symbols
+                        or (
+                            position["isin"]
+                            and position["isin"] in today_isins
+                        )
+                    )
+                    price_jobs.append((position, lots, is_current))
+
         for position in positions:
+            if include_equity_sections and day < today and position["asset_class"] == "equity":
+                continue
             lots, warning = _open_lots_for_position(conn, position)
             if warning:
                 warnings.append(warning)
@@ -926,7 +1239,84 @@ def build_portfolio_history_breakdown(
         conn.close()
 
     rows.sort(key=lambda row: row["symbol"].upper())
-    return {"date": day.isoformat(), "rows": rows, "warnings": warnings}
+    with ThreadPoolExecutor(max_workers=min(MAX_PRICE_FETCH_WORKERS, len(price_jobs) or 1)) as executor:
+        futures = {
+            executor.submit(
+                _fetch_position_prices,
+                position,
+                _period_start("5Y", today),
+                today,
+                db_path,
+            ): (position, lots, is_current)
+            for position, lots, is_current in price_jobs
+        }
+        for future in as_completed(futures):
+            position, lots, is_current = futures[future]
+            price_fetch_failed = False
+            try:
+                prices, _ = future.result()
+            except (ImportError, requests.RequestException, ValueError, RuntimeError) as exc:
+                price_fetch_failed = True
+                warnings.append(
+                    f"{position['symbol']}: historical price unavailable for the selected-date breakdown ({exc})"
+                )
+                prices = {}
+            price_dates = sorted(prices)
+            price_index = bisect_right(price_dates, day) - 1
+            quantity = sum(float(lot["quantity"]) for lot in lots)
+            invested = sum(float(lot["quantity"]) * float(lot["price"]) for lot in lots)
+            if price_index < 0:
+                if not price_fetch_failed:
+                    warnings.append(f"{position['symbol']}: no cached price on or before {day.isoformat()}.")
+                warnings.append(
+                    f"{position['symbol']}: quantity and cost are shown, but market value and P&L are unavailable."
+                )
+                price_date = None
+                price = None
+                current_value = None
+                pnl = None
+            else:
+                price_date = price_dates[price_index]
+                price_age = (day - price_date).days
+                if price_age > 7:
+                    warnings.append(
+                        f"{position['symbol']}: using a stale price from {price_date.isoformat()} "
+                        f"({price_age} days old) for {day.isoformat()}."
+                    )
+                price = prices[price_date]
+                current_value = quantity * price
+                pnl = current_value - invested
+
+            row = {
+                "symbol": position["symbol"],
+                "name": position["name"],
+                "asset_class": "equity",
+                "quantity": round(quantity, 6),
+                "price": round(price, 4) if price is not None else None,
+                "price_date": price_date.isoformat() if price_date else None,
+                "invested": round(invested, 2),
+                "current_value": round(current_value, 2) if current_value is not None else None,
+                "pnl": round(pnl, 2) if pnl is not None else None,
+            }
+            section = "current" if is_current else "former"
+            section_rows[section].append(row)
+
+    section_rows["current"].extend(rows)
+    for section in ("current", "former"):
+        section_rows[section].sort(key=lambda row: row["symbol"].upper())
+    section_rows["realized"].sort(key=lambda row: row["symbol"].upper())
+    if not include_equity_sections:
+        return {"date": day.isoformat(), "rows": rows, "warnings": warnings}
+    return {
+        "date": day.isoformat(),
+        "rows": section_rows["current"],
+        "current_rows": section_rows["current"],
+        "former_rows": section_rows["former"],
+        "realized_rows": section_rows["realized"],
+        "realized_total": round(sum(row["pnl"] for row in section_rows["realized"]), 2),
+        "include_realized_returns": True,
+        "warnings": warnings,
+    }
 
 
 def build_portfolio_history(
@@ -935,6 +1325,7 @@ def build_portfolio_history(
     selected_assets: Iterable[str],
     period: str = "1M",
     db_path: Optional[str | Path] = None,
+    include_realized_returns: bool = False,
 ) -> Dict[str, Any]:
     normalized_period = period.upper()
     if normalized_period not in PERIOD_DAYS:
@@ -949,22 +1340,19 @@ def build_portfolio_history(
     today = date.today()
     start = _period_start(normalized_period, today)
     positions = _position_map(holdings, mf_holdings, selected)
-    if not positions:
-        return {
-            "period": normalized_period,
-            "selected_assets": sorted(selected),
-            "points": [],
-            "period_return_pct": None,
-            "period_xirr_pct": None,
-            "warnings": [],
-            "sources": [],
-            "available_holdings": [],
-        }
 
     ensure_history_tables(db_path)
     conn = _connect(db_path)
     lots_by_key: Dict[str, List[Dict[str, Any]]] = {}
     warnings: List[str] = []
+    realized_by_date: Dict[date, float] = {}
+    include_realized_equity = include_realized_returns and "equity" in selected
+    if include_realized_equity:
+        realized_by_date = _realized_equity_pnl_by_date(conn, today)
+        warnings.append(
+            "Realized equity P&L uses the imported trade ledger. Same-day equal buy/sell quantities "
+            "are excluded as likely MIS because CNC/MIS labels are unavailable."
+        )
     for position in positions:
         lots, warning = _open_lots_for_position(conn, position)
         lots_by_key[position["instrument_key"]] = lots
@@ -976,6 +1364,18 @@ def build_portfolio_history(
             )
     chart_positions = [position for position in positions if lots_by_key.get(position["instrument_key"])]
     conn.close()
+    if not positions:
+        points = _merge_realized_equity_pnl([], realized_by_date, start, today)
+        return {
+            "period": normalized_period,
+            "selected_assets": sorted(selected),
+            "points": points,
+            "period_return_pct": None,
+            "period_xirr_pct": None,
+            "warnings": warnings,
+            "sources": [],
+            "available_holdings": [],
+        }
 
     prices_by_key: Dict[str, Dict[date, float]] = {}
     sources = set()
@@ -1030,6 +1430,9 @@ def build_portfolio_history(
             points[-1] = latest_point
         else:
             points.append(latest_point)
+
+    if include_realized_equity:
+        points = _merge_realized_equity_pnl(points, realized_by_date, start, today)
 
     period_return_pct = _modified_dietz_return(points, lots_by_key, priced_positions)
     period_xirr_pct = _period_xirr(points, lots_by_key, priced_positions)

@@ -23,13 +23,17 @@ usable historical prices. Its money-weighted XIRR is shown in brackets, using
 the portfolio value at the period start, purchases of currently held lots
 during the period, and the portfolio value at the period end.
 Click a chart date to see its holdings, applicable price dates, quantities,
-invested value, current value, and P&L in a sortable breakdown table.
+invested value, current value, and P&L in a sortable breakdown table. With
+realized P&L enabled, the breakdown separates holdings still held today, stocks
+held on the selected date but sold since, and realized P&L through that date.
 
-The chart only includes lots that remain open in the current portfolio. Fully
-sold positions and realized gains are excluded. Historical quantities and
-purchase costs come from the locally imported Zerodha tradebook and manual
-adjustments; make sure the tradebook has been refreshed. Ledger gaps and
-unavailable prices are called out rather than filled with estimated values.
+By default, the chart only includes lots that remain open in the current
+portfolio. Enable **Include realized P&L** to add cumulative FIFO realized
+equity gains/losses, including fully sold positions, to the chart and its
+period-end P&L. Historical quantities and purchase costs come from the locally
+imported Zerodha tradebook and manual adjustments; make sure the tradebook has
+been refreshed. Ledger gaps and unavailable prices are called out rather than
+filled with estimated values.
 
 NSE-listed equity, debt, and metal prices are retrieved with `jugaad-data`,
 using the holding's trading symbol and the tradebook's NSE series when
@@ -60,8 +64,9 @@ lots. The imported tradebook files do not provide CNC/MIS product labels;
 same-day buys are processed before sells, matching the Holdings breakdown FIFO
 behavior. Holdings XIRR is calculated only for open lots up to the current
 quantity; a date with exactly offsetting buy and sell quantities is excluded as
-a likely MIS round trip. This is a heuristic and can also exclude legitimate
-same-day CNC activity because product labels are unavailable.
+a likely MIS round trip. The optional realized P&L uses the same heuristic.
+This can also exclude legitimate same-day CNC activity because product labels
+are unavailable.
 
 ## Tradebook and discrepancy workflow
 
